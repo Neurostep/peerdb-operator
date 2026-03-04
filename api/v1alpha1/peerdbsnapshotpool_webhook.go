@@ -44,16 +44,15 @@ type PeerDBSnapshotPoolCustomValidator struct {
 	Client client.Reader
 }
 
-var _ webhook.CustomDefaulter = &PeerDBSnapshotPoolCustomDefaulter{}
-var _ webhook.CustomValidator = &PeerDBSnapshotPoolCustomValidator{}
+var _ webhook.CustomDefaulter = &PeerDBSnapshotPoolCustomDefaulter{} //nolint:staticcheck // TODO: migrate to typed Defaulter[T]
+var _ webhook.CustomValidator = &PeerDBSnapshotPoolCustomValidator{} //nolint:staticcheck // TODO: migrate to typed Validator[T]
 
 // SetupPeerDBSnapshotPoolWebhookWithManager sets up the webhook for PeerDBSnapshotPool.
 func SetupPeerDBSnapshotPoolWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&PeerDBSnapshotPool{}).
-		WithDefaulter(&PeerDBSnapshotPoolCustomDefaulter{}).
-		WithValidator(&PeerDBSnapshotPoolCustomValidator{Client: mgr.GetClient()}).
-		Complete()
+	return ctrl.NewWebhookManagedBy(mgr, &PeerDBSnapshotPool{}). //nolint:staticcheck // TODO: migrate to typed Defaulter[T]/Validator[T]
+									WithCustomDefaulter(&PeerDBSnapshotPoolCustomDefaulter{}).
+									WithCustomValidator(&PeerDBSnapshotPoolCustomValidator{Client: mgr.GetClient()}).
+									Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-peerdb-peerdb-io-v1alpha1-peerdbsnapshotpool,mutating=true,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbsnapshotpools,verbs=create;update,versions=v1alpha1,name=mpeerdbsnapshotpool.kb.io,admissionReviewVersions=v1

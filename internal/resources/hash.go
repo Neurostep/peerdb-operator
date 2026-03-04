@@ -21,7 +21,7 @@ func ComputeConfigHash(configData map[string]string, secretResourceVersions map[
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(h, "config:%s=%s\n", k, configData[k])
+		_, _ = fmt.Fprintf(h, "config:%s=%s\n", k, configData[k])
 	}
 
 	// Write sorted secret resource versions
@@ -31,7 +31,7 @@ func ComputeConfigHash(configData map[string]string, secretResourceVersions map[
 	}
 	sort.Strings(secretKeys)
 	for _, k := range secretKeys {
-		fmt.Fprintf(h, "secret:%s=%s\n", k, secretResourceVersions[k])
+		_, _ = fmt.Fprintf(h, "secret:%s=%s\n", k, secretResourceVersions[k])
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]

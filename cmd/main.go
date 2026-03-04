@@ -204,7 +204,7 @@ func main() {
 	if err := (&controller.PeerDBClusterReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("peerdbcluster-controller"),
+		Recorder: mgr.GetEventRecorder("peerdbcluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PeerDBCluster")
 		os.Exit(1)
@@ -212,7 +212,7 @@ func main() {
 	if err := (&controller.PeerDBWorkerPoolReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("peerdbworkerpool-controller"),
+		Recorder: mgr.GetEventRecorder("peerdbworkerpool-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PeerDBWorkerPool")
 		os.Exit(1)
@@ -220,7 +220,7 @@ func main() {
 	if err := (&controller.PeerDBSnapshotPoolReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("peerdbsnapshotpool-controller"),
+		Recorder: mgr.GetEventRecorder("peerdbsnapshotpool-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PeerDBSnapshotPool")
 		os.Exit(1)

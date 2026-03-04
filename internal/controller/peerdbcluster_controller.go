@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,7 +49,7 @@ import (
 type PeerDBClusterReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=peerdb.peerdb.io,resources=peerdbclusters,verbs=get;list;watch;create;update;patch;delete
@@ -82,31 +82,93 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	})
 
 	if cluster.Spec.Paused {
-		log.Info("PeerDBCluster is paused, skipping reconciliation")
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:               peerdbv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: cluster.Generation,
-			Reason:             peerdbv1alpha1.ReasonPaused,
-			Message:            "Cluster reconciliation is paused",
-		})
-		r.Recorder.Event(cluster, corev1.EventTypeNormal, peerdbv1alpha1.ReasonPaused, "Cluster reconciliation is paused")
-		peerdbmetrics.ClusterReady.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
-		cluster.Status.ObservedGeneration = cluster.Generation
-		if err := r.Status().Update(ctx, cluster); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return r.reconcilePaused(ctx, cluster)
 	}
 
 	// Check if backup fencing is active.
 	backupInProgress := cluster.Annotations[peerdbv1alpha1.AnnotationBackupInProgress] != ""
 	if backupInProgress {
 		log.Info("Backup in progress, fencing destructive operations")
-		r.Recorder.Event(cluster, corev1.EventTypeNormal, peerdbv1alpha1.ReasonBackupInProgress, "Backup in progress: destructive operations are fenced")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonBackupInProgress, "BackupFencing", "Backup in progress: destructive operations are fenced")
 	}
 
-	// Validate dependency secret refs exist.
+	// Validate dependency secret refs and compute config hash.
+	configHash, err := r.reconcileDependencies(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if configHash == "" {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Reconcile ServiceAccount.
+	if sa := resources.BuildServiceAccount(cluster); sa != nil {
+		if err := r.reconcileServiceAccount(ctx, cluster, sa); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Reconcile ConfigMap.
+	desiredConfigMap := resources.BuildConfigMap(cluster)
+	if err := r.reconcileConfigMap(ctx, cluster, desiredConfigMap); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Handle upgrade lifecycle.
+	if done, result, err := r.reconcileUpgradeLifecycle(ctx, cluster, configHash, backupInProgress); done {
+		return result, err
+	}
+
+	// Standard reconciliation (no upgrade in progress, or upgrade complete).
+	initReady, err := r.reconcileInitJobsAndStatus(ctx, cluster, backupInProgress)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	componentsReady, err := r.reconcileComponentsAndStatus(ctx, cluster, configHash, backupInProgress)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	r.setFinalConditions(cluster, initReady, componentsReady, backupInProgress)
+
+	cluster.Status.ObservedGeneration = cluster.Generation
+
+	if statusErr := r.updateStatus(ctx, cluster); statusErr != nil {
+		if apierrors.IsConflict(statusErr) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, statusErr
+	}
+
+	if !initReady || !componentsReady {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *PeerDBClusterReconciler) reconcilePaused(ctx context.Context, cluster *peerdbv1alpha1.PeerDBCluster) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	log.Info("PeerDBCluster is paused, skipping reconciliation")
+	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               peerdbv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: cluster.Generation,
+		Reason:             peerdbv1alpha1.ReasonPaused,
+		Message:            "Cluster reconciliation is paused",
+	})
+	r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonPaused, "Paused", "Cluster reconciliation is paused")
+	peerdbmetrics.ClusterReady.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
+	cluster.Status.ObservedGeneration = cluster.Generation
+	if err := r.Status().Update(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// reconcileDependencies validates catalog secret and sets dependency conditions.
+// Returns the config hash, or "" if dependencies are not ready.
+func (r *PeerDBClusterReconciler) reconcileDependencies(ctx context.Context, cluster *peerdbv1alpha1.PeerDBCluster) (string, error) {
 	catalogSecretRef := cluster.Spec.Dependencies.Catalog.PasswordSecretRef
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Name: catalogSecretRef.Name, Namespace: cluster.Namespace}, secret); err != nil {
@@ -124,14 +186,14 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Reason:             peerdbv1alpha1.ReasonDependencyNotReady,
 			Message:            "Catalog dependency is not ready",
 		})
-		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, peerdbv1alpha1.ReasonSecretNotFound, "Catalog password secret %q not found", catalogSecretRef.Name)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonSecretNotFound, "DependencyCheck", "Catalog password secret %q not found", catalogSecretRef.Name)
 		peerdbmetrics.ReconcileErrorsTotal.WithLabelValues("peerdbcluster").Inc()
 		peerdbmetrics.ClusterReady.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
 		cluster.Status.ObservedGeneration = cluster.Generation
-		if err := r.Status().Update(ctx, cluster); err != nil {
-			return ctrl.Result{}, err
+		if statusErr := r.Status().Update(ctx, cluster); statusErr != nil {
+			return "", statusErr
 		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return "", nil
 	}
 	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               peerdbv1alpha1.ConditionCatalogReady,
@@ -148,26 +210,23 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Message:            fmt.Sprintf("Temporal configured at %s", cluster.Spec.Dependencies.Temporal.Address),
 	})
 
-	// Compute config hash for rollout annotations.
 	desiredConfigMap := resources.BuildConfigMap(cluster)
 	secretRVs := map[string]string{
 		catalogSecretRef.Name: secret.ResourceVersion,
 	}
-	configHash := resources.ComputeConfigHash(desiredConfigMap.Data, secretRVs)
+	return resources.ComputeConfigHash(desiredConfigMap.Data, secretRVs), nil
+}
 
-	// Reconcile ServiceAccount.
-	if sa := resources.BuildServiceAccount(cluster); sa != nil {
-		if err := r.reconcileServiceAccount(ctx, cluster, sa); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+// reconcileUpgradeLifecycle handles upgrade detection and orchestration.
+// Returns (done, result, err) where done=true means the caller should return immediately.
+func (r *PeerDBClusterReconciler) reconcileUpgradeLifecycle(
+	ctx context.Context,
+	cluster *peerdbv1alpha1.PeerDBCluster,
+	configHash string,
+	backupInProgress bool,
+) (bool, ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 
-	// Reconcile ConfigMap.
-	if err := r.reconcileConfigMap(ctx, cluster, desiredConfigMap); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Initialize upgrade status if nil (first reconcile or pre-upgrade-orchestration cluster).
 	if cluster.Status.Upgrade == nil {
 		cluster.Status.Upgrade = &peerdbv1alpha1.UpgradeStatus{
 			ToVersion: cluster.Spec.Version,
@@ -176,57 +235,60 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if backupInProgress {
-		// Skip upgrades and mutations during backup fencing.
 		log.Info("Skipping upgrade reconciliation during backup")
-	} else {
-		// Detect version upgrade request.
-		upgradeInProgress := cluster.Status.Upgrade.Phase != peerdbv1alpha1.UpgradePhaseComplete
-		versionChanged := cluster.Spec.Version != cluster.Status.Upgrade.ToVersion
-
-		if versionChanged && !upgradeInProgress {
-			// New upgrade requested.
-			now := metav1.Now()
-			cluster.Status.Upgrade = &peerdbv1alpha1.UpgradeStatus{
-				FromVersion: cluster.Status.Upgrade.ToVersion,
-				ToVersion:   cluster.Spec.Version,
-				Phase:       peerdbv1alpha1.UpgradePhaseWaiting,
-				StartedAt:   &now,
-				Message:     "Upgrade requested",
-			}
-			upgradeInProgress = true
-			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, peerdbv1alpha1.ReasonUpgradeInProgress,
-				"Version upgrade requested: %s → %s", cluster.Status.Upgrade.FromVersion, cluster.Spec.Version)
-			log.Info("Version upgrade requested",
-				"from", cluster.Status.Upgrade.FromVersion,
-				"to", cluster.Spec.Version)
-		}
-
-		if upgradeInProgress {
-			result, err := r.reconcileUpgrade(ctx, cluster, configHash)
-			if err != nil {
-				return result, err
-			}
-			// After upgrade reconciliation, continue to status update below.
-			if result.RequeueAfter > 0 || result.Requeue {
-				// Update status and requeue.
-				cluster.Status.ObservedGeneration = cluster.Generation
-				if statusErr := r.updateStatus(ctx, cluster); statusErr != nil {
-					if apierrors.IsConflict(statusErr) {
-						return ctrl.Result{Requeue: true}, nil
-					}
-					return ctrl.Result{}, statusErr
-				}
-				return result, nil
-			}
-		}
+		return false, ctrl.Result{}, nil
 	}
 
-	// Standard reconciliation (no upgrade in progress, or upgrade complete).
-	// Reconcile init jobs.
+	upgradeInProgress := cluster.Status.Upgrade.Phase != peerdbv1alpha1.UpgradePhaseComplete
+	versionChanged := cluster.Spec.Version != cluster.Status.Upgrade.ToVersion
+
+	if versionChanged && !upgradeInProgress {
+		now := metav1.Now()
+		cluster.Status.Upgrade = &peerdbv1alpha1.UpgradeStatus{
+			FromVersion: cluster.Status.Upgrade.ToVersion,
+			ToVersion:   cluster.Spec.Version,
+			Phase:       peerdbv1alpha1.UpgradePhaseWaiting,
+			StartedAt:   &now,
+			Message:     "Upgrade requested",
+		}
+		upgradeInProgress = true
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonUpgradeInProgress, "UpgradeRequested",
+			"Version upgrade requested: %s → %s", cluster.Status.Upgrade.FromVersion, cluster.Spec.Version)
+		log.Info("Version upgrade requested",
+			"from", cluster.Status.Upgrade.FromVersion,
+			"to", cluster.Spec.Version)
+	}
+
+	if !upgradeInProgress {
+		return false, ctrl.Result{}, nil
+	}
+
+	result, err := r.reconcileUpgrade(ctx, cluster, configHash)
+	if err != nil {
+		return true, result, err
+	}
+	if result.RequeueAfter > 0 {
+		cluster.Status.ObservedGeneration = cluster.Generation
+		if statusErr := r.updateStatus(ctx, cluster); statusErr != nil {
+			if apierrors.IsConflict(statusErr) {
+				return true, ctrl.Result{Requeue: true}, nil
+			}
+			return true, ctrl.Result{}, statusErr
+		}
+		return true, result, nil
+	}
+	return false, ctrl.Result{}, nil
+}
+
+func (r *PeerDBClusterReconciler) reconcileInitJobsAndStatus(
+	ctx context.Context,
+	cluster *peerdbv1alpha1.PeerDBCluster,
+	backupInProgress bool,
+) (bool, error) {
 	initReady := true
 	if !backupInProgress {
 		if err := r.reconcileInitJobs(ctx, cluster, &initReady); err != nil {
-			return ctrl.Result{}, err
+			return false, err
 		}
 	}
 	if initReady {
@@ -246,12 +308,18 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message:            "Init jobs have not completed yet",
 		})
 	}
+	return initReady, nil
+}
 
-	// Reconcile components: Flow API, PeerDB Server, UI.
+func (r *PeerDBClusterReconciler) reconcileComponentsAndStatus(
+	ctx context.Context,
+	cluster *peerdbv1alpha1.PeerDBCluster,
+	configHash string,
+	backupInProgress bool,
+) (bool, error) {
 	componentsReady := true
 
 	if backupInProgress {
-		// Read-only status check during backup fencing.
 		for _, depName := range []string{
 			fmt.Sprintf("%s-flow-api", cluster.Name),
 			fmt.Sprintf("%s-server", cluster.Name),
@@ -260,7 +328,7 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			dep := &appsv1.Deployment{}
 			if err := r.Get(ctx, types.NamespacedName{Name: depName, Namespace: cluster.Namespace}, dep); err != nil {
 				if !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, err
+					return false, err
 				}
 				componentsReady = false
 			} else if dep.Status.ReadyReplicas < dep.Status.Replicas {
@@ -273,7 +341,7 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			resources.BuildFlowAPIService(cluster),
 			&componentsReady,
 		); err != nil {
-			return ctrl.Result{}, err
+			return false, err
 		}
 
 		if err := r.reconcileDeploymentAndService(ctx, cluster,
@@ -281,7 +349,7 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			resources.BuildPeerDBServerService(cluster),
 			&componentsReady,
 		); err != nil {
-			return ctrl.Result{}, err
+			return false, err
 		}
 
 		if err := r.reconcileDeploymentAndService(ctx, cluster,
@@ -289,7 +357,7 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			resources.BuildUIService(cluster),
 			&componentsReady,
 		); err != nil {
-			return ctrl.Result{}, err
+			return false, err
 		}
 	}
 
@@ -311,7 +379,13 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 	}
 
-	// Set overall Ready condition.
+	return componentsReady, nil
+}
+
+func (r *PeerDBClusterReconciler) setFinalConditions(
+	cluster *peerdbv1alpha1.PeerDBCluster,
+	initReady, componentsReady, backupInProgress bool,
+) {
 	overallReady := initReady && componentsReady
 	if overallReady {
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
@@ -321,7 +395,7 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Reason:             peerdbv1alpha1.ReasonClusterReady,
 			Message:            "PeerDB cluster is ready",
 		})
-		r.Recorder.Event(cluster, corev1.EventTypeNormal, peerdbv1alpha1.ReasonClusterReady, "PeerDB cluster is ready")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonClusterReady, "Reconciled", "PeerDB cluster is ready")
 		peerdbmetrics.ClusterReady.WithLabelValues(cluster.Name, cluster.Namespace).Set(1)
 	} else {
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
@@ -334,7 +408,6 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		peerdbmetrics.ClusterReady.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
 	}
 
-	// Set BackupSafe condition.
 	upgradeActive := cluster.Status.Upgrade != nil && cluster.Status.Upgrade.Phase != peerdbv1alpha1.UpgradePhaseComplete
 	if backupInProgress {
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
@@ -362,7 +435,6 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 	}
 
-	// Clear Reconciling condition.
 	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               peerdbv1alpha1.ConditionReconciling,
 		Status:             metav1.ConditionFalse,
@@ -371,25 +443,11 @@ func (r *PeerDBClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Message:            "Reconciliation complete",
 	})
 
-	// Update endpoints.
 	cluster.Status.Endpoints = &peerdbv1alpha1.EndpointStatus{
 		ServerAddress:  fmt.Sprintf("%s-server.%s.svc.cluster.local:9900", cluster.Name, cluster.Namespace),
 		UIAddress:      fmt.Sprintf("%s-ui.%s.svc.cluster.local:3000", cluster.Name, cluster.Namespace),
 		FlowAPIAddress: fmt.Sprintf("%s-flow-api.%s.svc.cluster.local:8112", cluster.Name, cluster.Namespace),
 	}
-	cluster.Status.ObservedGeneration = cluster.Generation
-
-	if statusErr := r.updateStatus(ctx, cluster); statusErr != nil {
-		if apierrors.IsConflict(statusErr) {
-			return ctrl.Result{Requeue: true}, nil
-		}
-		return ctrl.Result{}, statusErr
-	}
-
-	if !overallReady {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-	return ctrl.Result{}, nil
 }
 
 // reconcileUpgrade drives the ordered upgrade state machine.
@@ -424,7 +482,7 @@ func (r *PeerDBClusterReconciler) reconcileUpgrade(ctx context.Context, cluster 
 		return r.upgradePhaseInitJobs(ctx, cluster)
 
 	case peerdbv1alpha1.UpgradePhaseFlowAPI:
-		return r.upgradePhaseComponent(ctx, cluster, configHash,
+		return r.upgradePhaseComponent(ctx, cluster,
 			resources.BuildFlowAPIDeployment(cluster, configHash),
 			resources.BuildFlowAPIService(cluster),
 			"Flow API",
@@ -432,7 +490,7 @@ func (r *PeerDBClusterReconciler) reconcileUpgrade(ctx context.Context, cluster 
 		)
 
 	case peerdbv1alpha1.UpgradePhaseServer:
-		return r.upgradePhaseComponent(ctx, cluster, configHash,
+		return r.upgradePhaseComponent(ctx, cluster,
 			resources.BuildPeerDBServerDeployment(cluster, configHash),
 			resources.BuildPeerDBServerService(cluster),
 			"PeerDB Server",
@@ -440,7 +498,7 @@ func (r *PeerDBClusterReconciler) reconcileUpgrade(ctx context.Context, cluster 
 		)
 
 	case peerdbv1alpha1.UpgradePhaseUI:
-		return r.upgradePhaseComponent(ctx, cluster, configHash,
+		return r.upgradePhaseComponent(ctx, cluster,
 			resources.BuildUIDeployment(cluster, configHash),
 			resources.BuildUIService(cluster),
 			"UI",
@@ -471,7 +529,7 @@ func (r *PeerDBClusterReconciler) upgradePhaseWaiting(ctx context.Context, clust
 		if !isInMaintenanceWindow(cluster.Spec.MaintenanceWindow) {
 			upgrade.Phase = peerdbv1alpha1.UpgradePhaseWaiting
 			upgrade.Message = "Waiting for maintenance window"
-			r.Recorder.Event(cluster, corev1.EventTypeNormal, peerdbv1alpha1.ReasonMaintenanceWindow, "Upgrade waiting for maintenance window")
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonMaintenanceWindow, "MaintenanceWindow", "Upgrade waiting for maintenance window")
 			log.Info("Upgrade waiting for maintenance window")
 			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
 		}
@@ -491,7 +549,7 @@ func (r *PeerDBClusterReconciler) upgradePhaseWaiting(ctx context.Context, clust
 			Reason:             peerdbv1alpha1.ReasonDegraded,
 			Message:            "Upgrade blocked: dependencies unhealthy",
 		})
-		r.Recorder.Event(cluster, corev1.EventTypeWarning, peerdbv1alpha1.ReasonUpgradeBlocked, "Upgrade blocked: dependencies unhealthy")
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonUpgradeBlocked, "UpgradeBlocked", "Upgrade blocked: dependencies unhealthy")
 		log.Info("Upgrade blocked due to unhealthy dependencies")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -566,7 +624,7 @@ func (r *PeerDBClusterReconciler) upgradePhaseInitJobs(ctx context.Context, clus
 
 		if initFailed {
 			upgrade.Phase = peerdbv1alpha1.UpgradePhaseBlocked
-			r.Recorder.Event(cluster, corev1.EventTypeWarning, peerdbv1alpha1.ReasonUpgradeBlocked, upgrade.Message)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonUpgradeBlocked, "UpgradeBlocked", upgrade.Message)
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 				Type:               peerdbv1alpha1.ConditionInitialized,
 				Status:             metav1.ConditionFalse,
@@ -604,7 +662,6 @@ func (r *PeerDBClusterReconciler) upgradePhaseInitJobs(ctx context.Context, clus
 func (r *PeerDBClusterReconciler) upgradePhaseComponent(
 	ctx context.Context,
 	cluster *peerdbv1alpha1.PeerDBCluster,
-	configHash string,
 	deployment *appsv1.Deployment,
 	service *corev1.Service,
 	componentName string,
@@ -649,7 +706,7 @@ func (r *PeerDBClusterReconciler) upgradePhaseComponent(
 			Reason:             peerdbv1alpha1.ReasonUpgradeComplete,
 			Message:            upgrade.Message,
 		})
-		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, peerdbv1alpha1.ReasonUpgradeComplete,
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonUpgradeComplete, "UpgradeComplete",
 			"Version upgrade complete: %s → %s", upgrade.FromVersion, upgrade.ToVersion)
 		log.Info("Upgrade complete", "from", upgrade.FromVersion, "to", upgrade.ToVersion)
 		// Return empty result to continue to standard reconciliation.

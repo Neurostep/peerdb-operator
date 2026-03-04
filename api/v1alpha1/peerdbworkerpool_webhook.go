@@ -44,16 +44,15 @@ type PeerDBWorkerPoolCustomValidator struct {
 	Client client.Reader
 }
 
-var _ webhook.CustomDefaulter = &PeerDBWorkerPoolCustomDefaulter{}
-var _ webhook.CustomValidator = &PeerDBWorkerPoolCustomValidator{}
+var _ webhook.CustomDefaulter = &PeerDBWorkerPoolCustomDefaulter{} //nolint:staticcheck // TODO: migrate to typed Defaulter[T]
+var _ webhook.CustomValidator = &PeerDBWorkerPoolCustomValidator{} //nolint:staticcheck // TODO: migrate to typed Validator[T]
 
 // SetupPeerDBWorkerPoolWebhookWithManager sets up the webhook for PeerDBWorkerPool.
 func SetupPeerDBWorkerPoolWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&PeerDBWorkerPool{}).
-		WithDefaulter(&PeerDBWorkerPoolCustomDefaulter{}).
-		WithValidator(&PeerDBWorkerPoolCustomValidator{Client: mgr.GetClient()}).
-		Complete()
+	return ctrl.NewWebhookManagedBy(mgr, &PeerDBWorkerPool{}). //nolint:staticcheck // TODO: migrate to typed Defaulter[T]/Validator[T]
+									WithCustomDefaulter(&PeerDBWorkerPoolCustomDefaulter{}).
+									WithCustomValidator(&PeerDBWorkerPoolCustomValidator{Client: mgr.GetClient()}).
+									Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-peerdb-peerdb-io-v1alpha1-peerdbworkerpool,mutating=true,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbworkerpools,verbs=create;update,versions=v1alpha1,name=mpeerdbworkerpool.kb.io,admissionReviewVersions=v1
@@ -184,13 +183,13 @@ func validateVersionSkew(image, clusterVersion string, fldPath *field.Path) *fie
 	if image == "" {
 		return nil
 	}
-	clusterMM, err := MajorMinorFromVersion(clusterVersion)
-	if err != nil {
-		return nil // can't validate if cluster version is unparseable
+	clusterMM, clusterErr := MajorMinorFromVersion(clusterVersion)
+	if clusterErr != nil {
+		return nil //nolint:nilerr // can't validate if cluster version is unparseable
 	}
-	imageMM, err := MajorMinorFromImage(image)
-	if err != nil {
-		return nil // can't validate digest-only or non-semver tags
+	imageMM, imageErr := MajorMinorFromImage(image)
+	if imageErr != nil {
+		return nil //nolint:nilerr // can't validate digest-only or non-semver tags
 	}
 	if clusterMM != imageMM {
 		return field.Invalid(fldPath, image,

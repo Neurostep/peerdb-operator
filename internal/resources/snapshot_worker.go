@@ -52,19 +52,18 @@ func BuildSnapshotWorkerStatefulSet(pool *v1alpha1.PeerDBSnapshotPool, cluster *
 
 	catalogSecret := cluster.Spec.Dependencies.Catalog.PasswordSecretRef
 
-	env := []corev1.EnvVar{
-		{
-			Name: "PEERDB_CATALOG_PASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: catalogSecret.Name,
-					},
-					Key: catalogSecret.Key,
+	env := make([]corev1.EnvVar, 0, 1+len(pool.Spec.ExtraEnv))
+	env = append(env, corev1.EnvVar{
+		Name: "PEERDB_CATALOG_PASSWORD",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: catalogSecret.Name,
 				},
+				Key: catalogSecret.Key,
 			},
 		},
-	}
+	})
 	env = append(env, pool.Spec.ExtraEnv...)
 
 	matchLabels := map[string]string{

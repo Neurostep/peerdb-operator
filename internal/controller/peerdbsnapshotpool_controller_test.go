@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	peerdbv1alpha1 "github.com/Neurostep/peerdb-operator/api/v1alpha1"
@@ -77,7 +77,7 @@ var _ = Describe("PeerDBSnapshotPool Controller", func() {
 			controllerReconciler := &PeerDBSnapshotPoolReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

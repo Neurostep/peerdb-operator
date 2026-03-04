@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,7 +48,7 @@ import (
 type PeerDBSnapshotPoolReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=peerdb.peerdb.io,resources=peerdbsnapshotpools,verbs=get;list;watch;create;update;patch;delete
@@ -84,7 +84,7 @@ func (r *PeerDBSnapshotPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 				Reason:             peerdbv1alpha1.ReasonClusterNotFound,
 				Message:            fmt.Sprintf("Referenced PeerDBCluster %q not found", pool.Spec.ClusterRef),
 			})
-			r.Recorder.Eventf(pool, corev1.EventTypeWarning, peerdbv1alpha1.ReasonClusterNotFound, "Referenced PeerDBCluster %q not found", pool.Spec.ClusterRef)
+			r.Recorder.Eventf(pool, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonClusterNotFound, "DependencyCheck", "Referenced PeerDBCluster %q not found", pool.Spec.ClusterRef)
 			peerdbmetrics.ReconcileErrorsTotal.WithLabelValues("peerdbsnapshotpool").Inc()
 			pool.Status.ObservedGeneration = pool.Generation
 			if statusErr := r.Status().Update(ctx, pool); statusErr != nil {
@@ -99,45 +99,15 @@ func (r *PeerDBSnapshotPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 	backupInProgress := cluster.Annotations[peerdbv1alpha1.AnnotationBackupInProgress] != ""
 
 	// Reconcile headless Service.
-	desiredSvc := resources.BuildSnapshotWorkerService(pool)
-	if err := controllerutil.SetControllerReference(pool, desiredSvc, r.Scheme); err != nil {
+	if err := r.reconcileService(ctx, pool); err != nil {
 		return ctrl.Result{}, err
-	}
-	existingSvc := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: desiredSvc.Name, Namespace: desiredSvc.Namespace}, existingSvc); apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, desiredSvc); err != nil {
-			return ctrl.Result{}, err
-		}
-	} else if err != nil {
-		return ctrl.Result{}, err
-	} else {
-		existingSvc.Spec.Selector = desiredSvc.Spec.Selector
-		existingSvc.Labels = desiredSvc.Labels
-		if err := r.Update(ctx, existingSvc); err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 
 	// Warn on version skew if the pool pins a custom image.
-	if pool.Spec.Image != "" {
-		clusterMM, clusterErr := peerdbv1alpha1.MajorMinorFromVersion(cluster.Spec.Version)
-		imageMM, imageErr := peerdbv1alpha1.MajorMinorFromImage(pool.Spec.Image)
-		if clusterErr == nil && imageErr == nil && clusterMM != imageMM {
-			r.Recorder.Eventf(pool, corev1.EventTypeWarning, peerdbv1alpha1.ReasonVersionSkew,
-				"Pinned image %q (major.minor %s) does not match cluster version %s (major.minor %s)",
-				pool.Spec.Image, imageMM, cluster.Spec.Version, clusterMM)
-			log.Info("Version skew detected", "image", pool.Spec.Image, "clusterVersion", cluster.Spec.Version)
-		}
-	}
+	r.checkVersionSkew(pool, cluster)
 
 	// Compute config hash from the cluster's ConfigMap and catalog secret.
-	desiredConfigMap := resources.BuildConfigMap(cluster)
-	catalogSecret := &corev1.Secret{}
-	secretRVs := map[string]string{}
-	if err := r.Get(ctx, types.NamespacedName{Name: cluster.Spec.Dependencies.Catalog.PasswordSecretRef.Name, Namespace: pool.Namespace}, catalogSecret); err == nil {
-		secretRVs[catalogSecret.Name] = catalogSecret.ResourceVersion
-	}
-	configHash := resources.ComputeConfigHash(desiredConfigMap.Data, secretRVs)
+	configHash := r.computePoolConfigHash(ctx, cluster, pool.Namespace)
 
 	// Build and reconcile the Snapshot Worker StatefulSet.
 	desired := resources.BuildSnapshotWorkerStatefulSet(pool, cluster, configHash)
@@ -158,7 +128,7 @@ func (r *PeerDBSnapshotPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			Reason:             peerdbv1alpha1.ReasonStatefulSetCreated,
 			Message:            "Snapshot worker StatefulSet was created and is starting",
 		})
-		r.Recorder.Event(pool, corev1.EventTypeNormal, peerdbv1alpha1.ReasonStatefulSetCreated, "Snapshot worker StatefulSet was created")
+		r.Recorder.Eventf(pool, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonStatefulSetCreated, "Created", "Snapshot worker StatefulSet was created")
 		pool.Status.ObservedGeneration = pool.Generation
 		if statusErr := r.Status().Update(ctx, pool); statusErr != nil {
 			log.Error(statusErr, "Failed to update status after StatefulSet creation")
@@ -171,19 +141,8 @@ func (r *PeerDBSnapshotPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Update mutable fields (skip during backup fencing).
 	if !backupInProgress {
-		needsUpdate := false
-		if !equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template) {
-			existing.Spec.Template = desired.Spec.Template
-			needsUpdate = true
-		}
-		if !equality.Semantic.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) {
-			existing.Spec.Replicas = desired.Spec.Replicas
-			needsUpdate = true
-		}
-		if needsUpdate {
-			if err := r.Update(ctx, existing); err != nil {
-				return ctrl.Result{}, err
-			}
+		if err := r.updateStatefulSet(ctx, existing, desired); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -211,7 +170,7 @@ func (r *PeerDBSnapshotPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 			Reason:             peerdbv1alpha1.ReasonStatefulSetReady,
 			Message:            fmt.Sprintf("%d/%d replicas are ready", existing.Status.ReadyReplicas, desiredReplicas),
 		})
-		r.Recorder.Event(pool, corev1.EventTypeNormal, peerdbv1alpha1.ReasonStatefulSetReady, fmt.Sprintf("%d/%d replicas are ready", existing.Status.ReadyReplicas, desiredReplicas))
+		r.Recorder.Eventf(pool, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonStatefulSetReady, "Reconciled", "%d/%d replicas are ready", existing.Status.ReadyReplicas, desiredReplicas)
 	} else {
 		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               peerdbv1alpha1.ConditionReady,
@@ -232,6 +191,61 @@ func (r *PeerDBSnapshotPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *PeerDBSnapshotPoolReconciler) reconcileService(ctx context.Context, pool *peerdbv1alpha1.PeerDBSnapshotPool) error {
+	desiredSvc := resources.BuildSnapshotWorkerService(pool)
+	if err := controllerutil.SetControllerReference(pool, desiredSvc, r.Scheme); err != nil {
+		return err
+	}
+	existingSvc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: desiredSvc.Name, Namespace: desiredSvc.Namespace}, existingSvc); apierrors.IsNotFound(err) {
+		return r.Create(ctx, desiredSvc)
+	} else if err != nil {
+		return err
+	}
+	existingSvc.Spec.Selector = desiredSvc.Spec.Selector
+	existingSvc.Labels = desiredSvc.Labels
+	return r.Update(ctx, existingSvc)
+}
+
+func (r *PeerDBSnapshotPoolReconciler) checkVersionSkew(pool *peerdbv1alpha1.PeerDBSnapshotPool, cluster *peerdbv1alpha1.PeerDBCluster) {
+	if pool.Spec.Image == "" {
+		return
+	}
+	clusterMM, clusterErr := peerdbv1alpha1.MajorMinorFromVersion(cluster.Spec.Version)
+	imageMM, imageErr := peerdbv1alpha1.MajorMinorFromImage(pool.Spec.Image)
+	if clusterErr == nil && imageErr == nil && clusterMM != imageMM {
+		r.Recorder.Eventf(pool, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonVersionSkew, "VersionSkewDetected",
+			"Pinned image %q (major.minor %s) does not match cluster version %s (major.minor %s)",
+			pool.Spec.Image, imageMM, cluster.Spec.Version, clusterMM)
+	}
+}
+
+func (r *PeerDBSnapshotPoolReconciler) computePoolConfigHash(ctx context.Context, cluster *peerdbv1alpha1.PeerDBCluster, namespace string) string {
+	desiredConfigMap := resources.BuildConfigMap(cluster)
+	catalogSecret := &corev1.Secret{}
+	secretRVs := map[string]string{}
+	if err := r.Get(ctx, types.NamespacedName{Name: cluster.Spec.Dependencies.Catalog.PasswordSecretRef.Name, Namespace: namespace}, catalogSecret); err == nil {
+		secretRVs[catalogSecret.Name] = catalogSecret.ResourceVersion
+	}
+	return resources.ComputeConfigHash(desiredConfigMap.Data, secretRVs)
+}
+
+func (r *PeerDBSnapshotPoolReconciler) updateStatefulSet(ctx context.Context, existing, desired *appsv1.StatefulSet) error {
+	needsUpdate := false
+	if !equality.Semantic.DeepEqual(existing.Spec.Template, desired.Spec.Template) {
+		existing.Spec.Template = desired.Spec.Template
+		needsUpdate = true
+	}
+	if !equality.Semantic.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) {
+		existing.Spec.Replicas = desired.Spec.Replicas
+		needsUpdate = true
+	}
+	if needsUpdate {
+		return r.Update(ctx, existing)
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -40,16 +40,15 @@ type PeerDBClusterCustomDefaulter struct{}
 // +kubebuilder:object:generate=false
 type PeerDBClusterCustomValidator struct{}
 
-var _ webhook.CustomDefaulter = &PeerDBClusterCustomDefaulter{}
-var _ webhook.CustomValidator = &PeerDBClusterCustomValidator{}
+var _ webhook.CustomDefaulter = &PeerDBClusterCustomDefaulter{} //nolint:staticcheck // TODO: migrate to typed Defaulter[T]
+var _ webhook.CustomValidator = &PeerDBClusterCustomValidator{} //nolint:staticcheck // TODO: migrate to typed Validator[T]
 
 // SetupPeerDBClusterWebhookWithManager sets up the webhook for PeerDBCluster.
 func SetupPeerDBClusterWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&PeerDBCluster{}).
-		WithDefaulter(&PeerDBClusterCustomDefaulter{}).
-		WithValidator(&PeerDBClusterCustomValidator{}).
-		Complete()
+	return ctrl.NewWebhookManagedBy(mgr, &PeerDBCluster{}). //nolint:staticcheck // TODO: migrate to typed Defaulter[T]/Validator[T]
+								WithCustomDefaulter(&PeerDBClusterCustomDefaulter{}).
+								WithCustomValidator(&PeerDBClusterCustomValidator{}).
+								Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-peerdb-peerdb-io-v1alpha1-peerdbcluster,mutating=true,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbclusters,verbs=create;update,versions=v1alpha1,name=mpeerdbcluster.kb.io,admissionReviewVersions=v1

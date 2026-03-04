@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,7 +48,7 @@ import (
 type PeerDBWorkerPoolReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=peerdb.peerdb.io,resources=peerdbworkerpools,verbs=get;list;watch;create;update;patch;delete
@@ -83,7 +83,7 @@ func (r *PeerDBWorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				Reason:             peerdbv1alpha1.ReasonClusterNotFound,
 				Message:            fmt.Sprintf("Referenced PeerDBCluster %q not found", pool.Spec.ClusterRef),
 			})
-			r.Recorder.Eventf(pool, corev1.EventTypeWarning, peerdbv1alpha1.ReasonClusterNotFound, "Referenced PeerDBCluster %q not found", pool.Spec.ClusterRef)
+			r.Recorder.Eventf(pool, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonClusterNotFound, "DependencyCheck", "Referenced PeerDBCluster %q not found", pool.Spec.ClusterRef)
 			peerdbmetrics.ReconcileErrorsTotal.WithLabelValues("peerdbworkerpool").Inc()
 			pool.Status.ObservedGeneration = pool.Generation
 			if statusErr := r.Status().Update(ctx, pool); statusErr != nil {
@@ -102,7 +102,7 @@ func (r *PeerDBWorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		clusterMM, clusterErr := peerdbv1alpha1.MajorMinorFromVersion(cluster.Spec.Version)
 		imageMM, imageErr := peerdbv1alpha1.MajorMinorFromImage(pool.Spec.Image)
 		if clusterErr == nil && imageErr == nil && clusterMM != imageMM {
-			r.Recorder.Eventf(pool, corev1.EventTypeWarning, peerdbv1alpha1.ReasonVersionSkew,
+			r.Recorder.Eventf(pool, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonVersionSkew, "VersionSkewDetected",
 				"Pinned image %q (major.minor %s) does not match cluster version %s (major.minor %s)",
 				pool.Spec.Image, imageMM, cluster.Spec.Version, clusterMM)
 			log.Info("Version skew detected", "image", pool.Spec.Image, "clusterVersion", cluster.Spec.Version)
@@ -137,7 +137,7 @@ func (r *PeerDBWorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Reason:             peerdbv1alpha1.ReasonDeploymentCreated,
 			Message:            "Worker deployment was created and is starting",
 		})
-		r.Recorder.Event(pool, corev1.EventTypeNormal, peerdbv1alpha1.ReasonDeploymentCreated, "Worker deployment was created")
+		r.Recorder.Eventf(pool, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonDeploymentCreated, "Created", "Worker deployment was created")
 		pool.Status.ObservedGeneration = pool.Generation
 		if statusErr := r.Status().Update(ctx, pool); statusErr != nil {
 			log.Error(statusErr, "Failed to update status after deployment creation")
@@ -182,7 +182,7 @@ func (r *PeerDBWorkerPoolReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Reason:             peerdbv1alpha1.ReasonDeploymentReady,
 			Message:            fmt.Sprintf("%d/%d replicas are ready", existing.Status.ReadyReplicas, existing.Status.Replicas),
 		})
-		r.Recorder.Event(pool, corev1.EventTypeNormal, peerdbv1alpha1.ReasonDeploymentReady, fmt.Sprintf("%d/%d replicas are ready", existing.Status.ReadyReplicas, existing.Status.Replicas))
+		r.Recorder.Eventf(pool, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonDeploymentReady, "Reconciled", "%d/%d replicas are ready", existing.Status.ReadyReplicas, existing.Status.Replicas)
 	} else {
 		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:               peerdbv1alpha1.ConditionReady,
