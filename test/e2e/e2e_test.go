@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -264,16 +265,338 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	Context("PeerDB resources", Ordered, func() {
+		const testNs = "peerdb-e2e"
+
+		BeforeAll(func() {
+			By("creating the test namespace")
+			cmd := exec.Command("kubectl", "create", "ns", testNs)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create test namespace")
+		})
+
+		AfterAll(func() {
+			By("removing the test namespace")
+			cmd := exec.Command("kubectl", "delete", "ns", testNs, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should set CatalogReady=False when catalog secret is missing", func() {
+			By("creating a PeerDBCluster without the required secret")
+			clusterYAML := `apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBCluster
+metadata:
+  name: test-no-secret
+  namespace: ` + testNs + `
+spec:
+  version: "v0.36.7"
+  dependencies:
+    catalog:
+      host: "catalog.example.com"
+      port: 5432
+      database: "peerdb"
+      user: "peerdb"
+      passwordSecretRef:
+        name: missing-secret
+        key: password
+      sslMode: "disable"
+    temporal:
+      address: "temporal.example.com:7233"
+      namespace: "default"
+  init:
+    temporalNamespaceRegistration:
+      enabled: false
+    temporalSearchAttributes:
+      enabled: false`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying CatalogReady=False and Ready=False")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "peerdbcluster", "test-no-secret",
+					"-n", testNs, "-o", "jsonpath={.status.conditions}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(`"type":"CatalogReady"`))
+				g.Expect(output).To(ContainSubstring(`"status":"False"`))
+				g.Expect(output).To(ContainSubstring(`"reason":"SecretNotFound"`))
+			}).Should(Succeed())
+
+			By("verifying no downstream resources were created")
+			cmd = exec.Command("kubectl", "get", "configmap", "test-no-secret-config",
+				"-n", testNs, "--no-headers")
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "ConfigMap should not exist when secret is missing")
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "peerdbcluster", "test-no-secret",
+				"-n", testNs, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should create all expected resources for a PeerDBCluster", func() {
+			By("creating the catalog password secret")
+			secretYAML := `apiVersion: v1
+kind: Secret
+metadata:
+  name: e2e-catalog-password
+  namespace: ` + testNs + `
+stringData:
+  password: test-password`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(secretYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating the PeerDBCluster")
+			clusterYAML := `apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBCluster
+metadata:
+  name: e2e-cluster
+  namespace: ` + testNs + `
+spec:
+  version: "v0.36.7"
+  dependencies:
+    catalog:
+      host: "catalog.example.com"
+      port: 5432
+      database: "peerdb"
+      user: "peerdb"
+      passwordSecretRef:
+        name: e2e-catalog-password
+        key: password
+      sslMode: "disable"
+    temporal:
+      address: "temporal.example.com:7233"
+      namespace: "default"
+  init:
+    temporalNamespaceRegistration:
+      enabled: false
+    temporalSearchAttributes:
+      enabled: false`
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying ConfigMap is created with expected keys")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "e2e-cluster-config",
+					"-n", testNs, "-o", "jsonpath={.data.PEERDB_CATALOG_HOST}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("catalog.example.com"))
+			}).Should(Succeed())
+
+			By("verifying ServiceAccount is created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "serviceaccount", "e2e-cluster",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("verifying Flow API Deployment and Service are created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "e2e-cluster-flow-api",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "get", "service", "e2e-cluster-flow-api",
+				"-n", testNs, "--no-headers")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying PeerDB Server Deployment and Service are created")
+			cmd = exec.Command("kubectl", "get", "deployment", "e2e-cluster-server",
+				"-n", testNs, "--no-headers")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "get", "service", "e2e-cluster-server",
+				"-n", testNs, "--no-headers")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying UI Deployment and Service are created")
+			cmd = exec.Command("kubectl", "get", "deployment", "e2e-cluster-ui",
+				"-n", testNs, "--no-headers")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "get", "service", "e2e-cluster-ui",
+				"-n", testNs, "--no-headers")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying CatalogReady and TemporalReady conditions are True")
+			cmd = exec.Command("kubectl", "get", "peerdbcluster", "e2e-cluster",
+				"-n", testNs, "-o", "jsonpath={.status.conditions}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring(`"type":"CatalogReady"`))
+			Expect(output).To(ContainSubstring(`"type":"TemporalReady"`))
+
+			By("verifying ownerReferences on ConfigMap point to PeerDBCluster")
+			cmd = exec.Command("kubectl", "get", "configmap", "e2e-cluster-config",
+				"-n", testNs, "-o", "jsonpath={.metadata.ownerReferences[0].kind}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("PeerDBCluster"))
+
+			By("verifying observedGeneration is set")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "peerdbcluster", "e2e-cluster",
+					"-n", testNs, "-o", "jsonpath={.status.observedGeneration}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}).Should(Succeed())
+		})
+
+		It("should create a worker Deployment for PeerDBWorkerPool", func() {
+			By("creating the PeerDBWorkerPool")
+			poolYAML := `apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBWorkerPool
+metadata:
+  name: e2e-workers
+  namespace: ` + testNs + `
+spec:
+  clusterRef: "e2e-cluster"
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(poolYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying worker Deployment is created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "e2e-workers",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("verifying ownerReferences point to PeerDBWorkerPool")
+			cmd = exec.Command("kubectl", "get", "deployment", "e2e-workers",
+				"-n", testNs, "-o", "jsonpath={.metadata.ownerReferences[0].kind}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("PeerDBWorkerPool"))
+
+			By("verifying worker pool status has Ready condition")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "peerdbworkerpool", "e2e-workers",
+					"-n", testNs, "-o", "jsonpath={.status.conditions}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(`"type":"Ready"`))
+			}).Should(Succeed())
+		})
+
+		It("should create a StatefulSet and headless Service for PeerDBSnapshotPool", func() {
+			By("creating the PeerDBSnapshotPool")
+			poolYAML := `apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBSnapshotPool
+metadata:
+  name: e2e-snapshot
+  namespace: ` + testNs + `
+spec:
+  clusterRef: "e2e-cluster"
+  replicas: 1
+  storage:
+    size: "1Gi"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(poolYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying snapshot StatefulSet is created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", "e2e-snapshot",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("verifying headless Service is created")
+			cmd = exec.Command("kubectl", "get", "service", "e2e-snapshot",
+				"-n", testNs, "-o", "jsonpath={.spec.clusterIP}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("None"))
+
+			By("verifying ownerReferences point to PeerDBSnapshotPool")
+			cmd = exec.Command("kubectl", "get", "statefulset", "e2e-snapshot",
+				"-n", testNs, "-o", "jsonpath={.metadata.ownerReferences[0].kind}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("PeerDBSnapshotPool"))
+
+			By("verifying snapshot pool status has Ready condition")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "peerdbsnapshotpool", "e2e-snapshot",
+					"-n", testNs, "-o", "jsonpath={.status.conditions}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(`"type":"Ready"`))
+			}).Should(Succeed())
+		})
+
+		It("should clean up owned resources when PeerDBCluster is deleted", func() {
+			By("deleting the PeerDBWorkerPool")
+			cmd := exec.Command("kubectl", "delete", "peerdbworkerpool", "e2e-workers",
+				"-n", testNs, "--ignore-not-found")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the PeerDBSnapshotPool")
+			cmd = exec.Command("kubectl", "delete", "peerdbsnapshotpool", "e2e-snapshot",
+				"-n", testNs, "--ignore-not-found")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the PeerDBCluster")
+			cmd = exec.Command("kubectl", "delete", "peerdbcluster", "e2e-cluster",
+				"-n", testNs)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying owned resources are garbage collected")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "e2e-cluster-config",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "ConfigMap should be garbage collected")
+			}).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "e2e-cluster-flow-api",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Flow API Deployment should be garbage collected")
+			}).Should(Succeed())
+		})
 	})
 })
 
