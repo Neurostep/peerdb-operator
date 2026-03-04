@@ -18,13 +18,10 @@ package v1alpha1
 
 import (
 	"context"
-	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -40,26 +37,21 @@ type PeerDBClusterCustomDefaulter struct{}
 // +kubebuilder:object:generate=false
 type PeerDBClusterCustomValidator struct{}
 
-var _ webhook.CustomDefaulter = &PeerDBClusterCustomDefaulter{} //nolint:staticcheck // TODO: migrate to typed Defaulter[T]
-var _ webhook.CustomValidator = &PeerDBClusterCustomValidator{} //nolint:staticcheck // TODO: migrate to typed Validator[T]
+var _ admission.Defaulter[*PeerDBCluster] = &PeerDBClusterCustomDefaulter{}
+var _ admission.Validator[*PeerDBCluster] = &PeerDBClusterCustomValidator{}
 
 // SetupPeerDBClusterWebhookWithManager sets up the webhook for PeerDBCluster.
 func SetupPeerDBClusterWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr, &PeerDBCluster{}). //nolint:staticcheck // TODO: migrate to typed Defaulter[T]/Validator[T]
-								WithCustomDefaulter(&PeerDBClusterCustomDefaulter{}).
-								WithCustomValidator(&PeerDBClusterCustomValidator{}).
-								Complete()
+	return ctrl.NewWebhookManagedBy(mgr, &PeerDBCluster{}).
+		WithDefaulter(&PeerDBClusterCustomDefaulter{}).
+		WithValidator(&PeerDBClusterCustomValidator{}).
+		Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-peerdb-peerdb-io-v1alpha1-peerdbcluster,mutating=true,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbclusters,verbs=create;update,versions=v1alpha1,name=mpeerdbcluster.kb.io,admissionReviewVersions=v1
 
-// Default implements webhook.CustomDefaulter.
-func (d *PeerDBClusterCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	cluster, ok := obj.(*PeerDBCluster)
-	if !ok {
-		return fmt.Errorf("expected PeerDBCluster, got %T", obj)
-	}
-
+// Default implements admission.Defaulter[*PeerDBCluster].
+func (d *PeerDBClusterCustomDefaulter) Default(_ context.Context, cluster *PeerDBCluster) error {
 	peerdbclusterlog.Info("defaulting", "name", cluster.Name)
 
 	// Default catalog port
@@ -102,29 +94,15 @@ func (d *PeerDBClusterCustomDefaulter) Default(_ context.Context, obj runtime.Ob
 
 // +kubebuilder:webhook:path=/validate-peerdb-peerdb-io-v1alpha1-peerdbcluster,mutating=false,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbclusters,verbs=create;update;delete,versions=v1alpha1,name=vpeerdbcluster.kb.io,admissionReviewVersions=v1
 
-// ValidateCreate implements webhook.CustomValidator.
-func (v *PeerDBClusterCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	cluster, ok := obj.(*PeerDBCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBCluster, got %T", obj)
-	}
-
+// ValidateCreate implements admission.Validator[*PeerDBCluster].
+func (v *PeerDBClusterCustomValidator) ValidateCreate(_ context.Context, cluster *PeerDBCluster) (admission.Warnings, error) {
 	peerdbclusterlog.Info("validating create", "name", cluster.Name)
 
 	return nil, validatePeerDBCluster(cluster).ToAggregate()
 }
 
-// ValidateUpdate implements webhook.CustomValidator.
-func (v *PeerDBClusterCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	newCluster, ok := newObj.(*PeerDBCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBCluster, got %T", newObj)
-	}
-	oldCluster, ok := oldObj.(*PeerDBCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBCluster, got %T", oldObj)
-	}
-
+// ValidateUpdate implements admission.Validator[*PeerDBCluster].
+func (v *PeerDBClusterCustomValidator) ValidateUpdate(_ context.Context, oldCluster, newCluster *PeerDBCluster) (admission.Warnings, error) {
 	peerdbclusterlog.Info("validating update", "name", newCluster.Name)
 
 	allErrs := validatePeerDBCluster(newCluster)
@@ -140,8 +118,8 @@ func (v *PeerDBClusterCustomValidator) ValidateUpdate(_ context.Context, oldObj,
 	return nil, allErrs.ToAggregate()
 }
 
-// ValidateDelete implements webhook.CustomValidator.
-func (v *PeerDBClusterCustomValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator[*PeerDBCluster].
+func (v *PeerDBClusterCustomValidator) ValidateDelete(_ context.Context, _ *PeerDBCluster) (admission.Warnings, error) {
 	return nil, nil
 }
 

@@ -20,13 +20,11 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -44,26 +42,21 @@ type PeerDBWorkerPoolCustomValidator struct {
 	Client client.Reader
 }
 
-var _ webhook.CustomDefaulter = &PeerDBWorkerPoolCustomDefaulter{} //nolint:staticcheck // TODO: migrate to typed Defaulter[T]
-var _ webhook.CustomValidator = &PeerDBWorkerPoolCustomValidator{} //nolint:staticcheck // TODO: migrate to typed Validator[T]
+var _ admission.Defaulter[*PeerDBWorkerPool] = &PeerDBWorkerPoolCustomDefaulter{}
+var _ admission.Validator[*PeerDBWorkerPool] = &PeerDBWorkerPoolCustomValidator{}
 
 // SetupPeerDBWorkerPoolWebhookWithManager sets up the webhook for PeerDBWorkerPool.
 func SetupPeerDBWorkerPoolWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr, &PeerDBWorkerPool{}). //nolint:staticcheck // TODO: migrate to typed Defaulter[T]/Validator[T]
-									WithCustomDefaulter(&PeerDBWorkerPoolCustomDefaulter{}).
-									WithCustomValidator(&PeerDBWorkerPoolCustomValidator{Client: mgr.GetClient()}).
-									Complete()
+	return ctrl.NewWebhookManagedBy(mgr, &PeerDBWorkerPool{}).
+		WithDefaulter(&PeerDBWorkerPoolCustomDefaulter{}).
+		WithValidator(&PeerDBWorkerPoolCustomValidator{Client: mgr.GetClient()}).
+		Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-peerdb-peerdb-io-v1alpha1-peerdbworkerpool,mutating=true,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbworkerpools,verbs=create;update,versions=v1alpha1,name=mpeerdbworkerpool.kb.io,admissionReviewVersions=v1
 
-// Default implements webhook.CustomDefaulter.
-func (d *PeerDBWorkerPoolCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	pool, ok := obj.(*PeerDBWorkerPool)
-	if !ok {
-		return fmt.Errorf("expected PeerDBWorkerPool, got %T", obj)
-	}
-
+// Default implements admission.Defaulter[*PeerDBWorkerPool].
+func (d *PeerDBWorkerPoolCustomDefaulter) Default(_ context.Context, pool *PeerDBWorkerPool) error {
 	peerdbworkerpoollog.Info("defaulting", "name", pool.Name)
 
 	// Default replicas
@@ -89,13 +82,8 @@ func (d *PeerDBWorkerPoolCustomDefaulter) Default(_ context.Context, obj runtime
 
 // +kubebuilder:webhook:path=/validate-peerdb-peerdb-io-v1alpha1-peerdbworkerpool,mutating=false,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbworkerpools,verbs=create;update;delete,versions=v1alpha1,name=vpeerdbworkerpool.kb.io,admissionReviewVersions=v1
 
-// ValidateCreate implements webhook.CustomValidator.
-func (v *PeerDBWorkerPoolCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	pool, ok := obj.(*PeerDBWorkerPool)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBWorkerPool, got %T", obj)
-	}
-
+// ValidateCreate implements admission.Validator[*PeerDBWorkerPool].
+func (v *PeerDBWorkerPoolCustomValidator) ValidateCreate(ctx context.Context, pool *PeerDBWorkerPool) (admission.Warnings, error) {
 	peerdbworkerpoollog.Info("validating create", "name", pool.Name)
 
 	allErrs := validatePeerDBWorkerPool(pool)
@@ -113,17 +101,8 @@ func (v *PeerDBWorkerPoolCustomValidator) ValidateCreate(ctx context.Context, ob
 	return nil, allErrs.ToAggregate()
 }
 
-// ValidateUpdate implements webhook.CustomValidator.
-func (v *PeerDBWorkerPoolCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	newPool, ok := newObj.(*PeerDBWorkerPool)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBWorkerPool, got %T", newObj)
-	}
-	oldPool, ok := oldObj.(*PeerDBWorkerPool)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBWorkerPool, got %T", oldObj)
-	}
-
+// ValidateUpdate implements admission.Validator[*PeerDBWorkerPool].
+func (v *PeerDBWorkerPoolCustomValidator) ValidateUpdate(ctx context.Context, oldPool, newPool *PeerDBWorkerPool) (admission.Warnings, error) {
 	peerdbworkerpoollog.Info("validating update", "name", newPool.Name)
 
 	allErrs := validatePeerDBWorkerPool(newPool)
@@ -149,8 +128,8 @@ func (v *PeerDBWorkerPoolCustomValidator) ValidateUpdate(ctx context.Context, ol
 	return nil, allErrs.ToAggregate()
 }
 
-// ValidateDelete implements webhook.CustomValidator.
-func (v *PeerDBWorkerPoolCustomValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator[*PeerDBWorkerPool].
+func (v *PeerDBWorkerPoolCustomValidator) ValidateDelete(_ context.Context, _ *PeerDBWorkerPool) (admission.Warnings, error) {
 	return nil, nil
 }
 

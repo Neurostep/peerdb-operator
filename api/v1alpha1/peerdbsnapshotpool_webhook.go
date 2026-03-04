@@ -18,15 +18,12 @@ package v1alpha1
 
 import (
 	"context"
-	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -44,26 +41,21 @@ type PeerDBSnapshotPoolCustomValidator struct {
 	Client client.Reader
 }
 
-var _ webhook.CustomDefaulter = &PeerDBSnapshotPoolCustomDefaulter{} //nolint:staticcheck // TODO: migrate to typed Defaulter[T]
-var _ webhook.CustomValidator = &PeerDBSnapshotPoolCustomValidator{} //nolint:staticcheck // TODO: migrate to typed Validator[T]
+var _ admission.Defaulter[*PeerDBSnapshotPool] = &PeerDBSnapshotPoolCustomDefaulter{}
+var _ admission.Validator[*PeerDBSnapshotPool] = &PeerDBSnapshotPoolCustomValidator{}
 
 // SetupPeerDBSnapshotPoolWebhookWithManager sets up the webhook for PeerDBSnapshotPool.
 func SetupPeerDBSnapshotPoolWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr, &PeerDBSnapshotPool{}). //nolint:staticcheck // TODO: migrate to typed Defaulter[T]/Validator[T]
-									WithCustomDefaulter(&PeerDBSnapshotPoolCustomDefaulter{}).
-									WithCustomValidator(&PeerDBSnapshotPoolCustomValidator{Client: mgr.GetClient()}).
-									Complete()
+	return ctrl.NewWebhookManagedBy(mgr, &PeerDBSnapshotPool{}).
+		WithDefaulter(&PeerDBSnapshotPoolCustomDefaulter{}).
+		WithValidator(&PeerDBSnapshotPoolCustomValidator{Client: mgr.GetClient()}).
+		Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-peerdb-peerdb-io-v1alpha1-peerdbsnapshotpool,mutating=true,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbsnapshotpools,verbs=create;update,versions=v1alpha1,name=mpeerdbsnapshotpool.kb.io,admissionReviewVersions=v1
 
-// Default implements webhook.CustomDefaulter.
-func (d *PeerDBSnapshotPoolCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	pool, ok := obj.(*PeerDBSnapshotPool)
-	if !ok {
-		return fmt.Errorf("expected PeerDBSnapshotPool, got %T", obj)
-	}
-
+// Default implements admission.Defaulter[*PeerDBSnapshotPool].
+func (d *PeerDBSnapshotPoolCustomDefaulter) Default(_ context.Context, pool *PeerDBSnapshotPool) error {
 	peerdbsnapshotpoollog.Info("defaulting", "name", pool.Name)
 
 	// Default replicas
@@ -83,13 +75,8 @@ func (d *PeerDBSnapshotPoolCustomDefaulter) Default(_ context.Context, obj runti
 
 // +kubebuilder:webhook:path=/validate-peerdb-peerdb-io-v1alpha1-peerdbsnapshotpool,mutating=false,failurePolicy=fail,sideEffects=None,groups=peerdb.peerdb.io,resources=peerdbsnapshotpools,verbs=create;update;delete,versions=v1alpha1,name=vpeerdbsnapshotpool.kb.io,admissionReviewVersions=v1
 
-// ValidateCreate implements webhook.CustomValidator.
-func (v *PeerDBSnapshotPoolCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	pool, ok := obj.(*PeerDBSnapshotPool)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBSnapshotPool, got %T", obj)
-	}
-
+// ValidateCreate implements admission.Validator[*PeerDBSnapshotPool].
+func (v *PeerDBSnapshotPoolCustomValidator) ValidateCreate(ctx context.Context, pool *PeerDBSnapshotPool) (admission.Warnings, error) {
 	peerdbsnapshotpoollog.Info("validating create", "name", pool.Name)
 
 	allErrs := validatePeerDBSnapshotPool(pool)
@@ -107,17 +94,8 @@ func (v *PeerDBSnapshotPoolCustomValidator) ValidateCreate(ctx context.Context, 
 	return nil, allErrs.ToAggregate()
 }
 
-// ValidateUpdate implements webhook.CustomValidator.
-func (v *PeerDBSnapshotPoolCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	newPool, ok := newObj.(*PeerDBSnapshotPool)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBSnapshotPool, got %T", newObj)
-	}
-	oldPool, ok := oldObj.(*PeerDBSnapshotPool)
-	if !ok {
-		return nil, fmt.Errorf("expected PeerDBSnapshotPool, got %T", oldObj)
-	}
-
+// ValidateUpdate implements admission.Validator[*PeerDBSnapshotPool].
+func (v *PeerDBSnapshotPoolCustomValidator) ValidateUpdate(ctx context.Context, oldPool, newPool *PeerDBSnapshotPool) (admission.Warnings, error) {
 	peerdbsnapshotpoollog.Info("validating update", "name", newPool.Name)
 
 	allErrs := validatePeerDBSnapshotPool(newPool)
@@ -153,8 +131,8 @@ func (v *PeerDBSnapshotPoolCustomValidator) ValidateUpdate(ctx context.Context, 
 	return nil, allErrs.ToAggregate()
 }
 
-// ValidateDelete implements webhook.CustomValidator.
-func (v *PeerDBSnapshotPoolCustomValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator[*PeerDBSnapshotPool].
+func (v *PeerDBSnapshotPoolCustomValidator) ValidateDelete(_ context.Context, _ *PeerDBSnapshotPool) (admission.Warnings, error) {
 	return nil, nil
 }
 
