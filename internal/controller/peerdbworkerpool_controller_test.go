@@ -18,10 +18,14 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -38,7 +42,7 @@ var _ = Describe("PeerDBWorkerPool Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		peerdbworkerpool := &peerdbv1alpha1.PeerDBWorkerPool{}
 
@@ -60,7 +64,6 @@ var _ = Describe("PeerDBWorkerPool Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &peerdbv1alpha1.PeerDBWorkerPool{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
@@ -68,7 +71,7 @@ var _ = Describe("PeerDBWorkerPool Controller", func() {
 			By("Cleanup the specific resource instance PeerDBWorkerPool")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
+		It("should set ClusterNotFound when referenced cluster does not exist", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &PeerDBWorkerPoolReconciler{
 				Client:   k8sClient,
@@ -76,12 +79,144 @@ var _ = Describe("PeerDBWorkerPool Controller", func() {
 				Recorder: events.NewFakeRecorder(10),
 			}
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+
+			pool := &peerdbv1alpha1.PeerDBWorkerPool{}
+			err = k8sClient.Get(ctx, typeNamespacedName, pool)
+			Expect(err).NotTo(HaveOccurred())
+
+			readyCond := meta.FindStatusCondition(pool.Status.Conditions, peerdbv1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(peerdbv1alpha1.ReasonClusterNotFound))
+		})
+	})
+
+	Context("When reconciling with a valid cluster reference", func() {
+		const resourceName = "test-worker-with-cluster"
+		const clusterName = "test-cluster-for-worker"
+
+		ctx := context.Background()
+
+		clusterNamespacedName := types.NamespacedName{
+			Name:      clusterName,
+			Namespace: "default",
+		}
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+
+		BeforeEach(func() {
+			By("creating the catalog password secret")
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "catalog-password-worker",
+					Namespace: "default",
+				},
+				StringData: map[string]string{
+					"password": "test-password",
+				},
+			}
+			err := k8sClient.Create(ctx, secret)
+			if err != nil && !apierrors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("creating the referenced PeerDBCluster")
+			cluster := &peerdbv1alpha1.PeerDBCluster{}
+			err = k8sClient.Get(ctx, clusterNamespacedName, cluster)
+			if err != nil && apierrors.IsNotFound(err) {
+				cluster = &peerdbv1alpha1.PeerDBCluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      clusterName,
+						Namespace: "default",
+					},
+					Spec: peerdbv1alpha1.PeerDBClusterSpec{
+						Version: "v0.36.7",
+						Dependencies: peerdbv1alpha1.DependenciesSpec{
+							Catalog: peerdbv1alpha1.CatalogSpec{
+								Host:     "catalog.example.com",
+								Database: "peerdb",
+								User:     "peerdb",
+								PasswordSecretRef: peerdbv1alpha1.SecretKeySelector{
+									Name: "catalog-password-worker",
+									Key:  "password",
+								},
+							},
+							Temporal: peerdbv1alpha1.TemporalSpec{
+								Address:   "temporal.example.com:7233",
+								Namespace: "peerdb",
+							},
+						},
+					},
+				}
+				Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			}
+
+			By("creating the PeerDBWorkerPool")
+			pool := &peerdbv1alpha1.PeerDBWorkerPool{}
+			err = k8sClient.Get(ctx, typeNamespacedName, pool)
+			if err != nil && apierrors.IsNotFound(err) {
+				pool = &peerdbv1alpha1.PeerDBWorkerPool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resourceName,
+						Namespace: "default",
+					},
+					Spec: peerdbv1alpha1.PeerDBWorkerPoolSpec{
+						ClusterRef: clusterName,
+					},
+				}
+				Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+			}
+		})
+
+		AfterEach(func() {
+			pool := &peerdbv1alpha1.PeerDBWorkerPool{}
+			err := k8sClient.Get(ctx, typeNamespacedName, pool)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, pool)).To(Succeed())
+			}
+
+			cluster := &peerdbv1alpha1.PeerDBCluster{}
+			err = k8sClient.Get(ctx, clusterNamespacedName, cluster)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			}
+		})
+
+		It("should create worker deployment and set status", func() {
+			controllerReconciler := &PeerDBWorkerPoolReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+			}
+
+			result, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Second))
+
+			deploy := &appsv1.Deployment{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      resourceName,
+				Namespace: "default",
+			}, deploy)
+			Expect(err).NotTo(HaveOccurred())
+
+			pool := &peerdbv1alpha1.PeerDBWorkerPool{}
+			err = k8sClient.Get(ctx, typeNamespacedName, pool)
+			Expect(err).NotTo(HaveOccurred())
+
+			readyCond := meta.FindStatusCondition(pool.Status.Conditions, peerdbv1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(peerdbv1alpha1.ReasonDeploymentCreated))
 		})
 	})
 })

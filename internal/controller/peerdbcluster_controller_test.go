@@ -42,7 +42,7 @@ var _ = Describe("PeerDBCluster Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		peerdbcluster := &peerdbv1alpha1.PeerDBCluster{}
 
@@ -94,7 +94,6 @@ var _ = Describe("PeerDBCluster Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &peerdbv1alpha1.PeerDBCluster{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
