@@ -1,0 +1,73 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "peerdb-operator.fullname" . }}-validating
+  labels:
+    {{- include "peerdb-operator.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "peerdb-operator.fullname" . }}-webhook
+  {{- end }}
+webhooks:
+  - name: vpeerdbcluster.kb.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "peerdb-operator.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-peerdb-peerdb-io-v1alpha1-peerdbcluster
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - peerdb.peerdb.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - peerdbclusters
+    sideEffects: None
+  - name: vpeerdbworkerpool.kb.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "peerdb-operator.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-peerdb-peerdb-io-v1alpha1-peerdbworkerpool
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - peerdb.peerdb.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - peerdbworkerpools
+    sideEffects: None
+  - name: vpeerdbsnapshotpool.kb.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "peerdb-operator.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-peerdb-peerdb-io-v1alpha1-peerdbsnapshotpool
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - peerdb.peerdb.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - peerdbsnapshotpools
+    sideEffects: None
+{{- end }}

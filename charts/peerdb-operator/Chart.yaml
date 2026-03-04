@@ -1,0 +1,19 @@
+apiVersion: v2
+name: peerdb-operator
+description: A Helm chart for PeerDB Operator - Kubernetes operator for PeerDB
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/Neurostep/peerdb-operator
+sources:
+  - https://github.com/Neurostep/peerdb-operator
+maintainers:
+  - name: Neurostep
+kubeVersion: ">=1.26.0-0"
+keywords:
+  - peerdb
+  - operator
+  - kubernetes
+  - etl
+  - cdc
+  - postgres

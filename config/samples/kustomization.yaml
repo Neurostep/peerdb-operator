@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- peerdb_v1alpha1_peerdbcluster.yaml
+- peerdb_v1alpha1_peerdbworkerpool.yaml
+- peerdb_v1alpha1_peerdbsnapshotpool.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

@@ -1,0 +1,18 @@
+apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBSnapshotPool
+metadata:
+  name: peerdb-snapshot
+  namespace: peerdb-system
+spec:
+  clusterRef: "peerdb"
+  replicas: 1
+  storage:
+    size: "10Gi"
+  terminationGracePeriodSeconds: 600
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"

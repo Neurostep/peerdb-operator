@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  verify-manifests:
+    name: Verify Generated Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Generate manifests
+        run: make manifests generate
+
+      - name: Check for uncommitted changes
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::Generated files are out of date. Run 'make manifests generate' and commit the result."
+            exit 1
+          fi
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: make test
+
+  e2e:
+    name: E2E (K8s ${{ matrix.kube-version.tag }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kube-version:
+          - tag: v1.30.10
+            kind-image: kindest/node:v1.30.10@sha256:4de75d0e82481ea846c0ed1de86328e17eaa07e20d3c3620bff34e3695c3d7aa
+          - tag: v1.31.6
+            kind-image: kindest/node:v1.31.6@sha256:28b7cbb993dfe093c76641a0c95807637213c9109b761f1d422c32ee50cd12c5
+          - tag: v1.32.2
+            kind-image: kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          node_image: ${{ matrix.kube-version.kind-image }}
+          cluster_name: peerdb-operator-e2e
+
+      - name: Verify cluster
+        run: |
+          kubectl cluster-info
+          kubectl version
+
+      - name: Run e2e tests
+        run: make test-e2e KIND_CLUSTER=peerdb-operator-e2e
+        env:
+          KIND: kind
+
+      - name: Export cluster logs
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-logs
+          kind export logs /tmp/e2e-logs --name peerdb-operator-e2e
+
+      - name: Upload cluster logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.kube-version.tag }}
+          path: /tmp/e2e-logs
+          retention-days: 7

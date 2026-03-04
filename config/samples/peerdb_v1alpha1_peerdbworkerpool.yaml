@@ -1,0 +1,15 @@
+apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBWorkerPool
+metadata:
+  name: peerdb-workers
+  namespace: peerdb-system
+spec:
+  clusterRef: "peerdb"
+  replicas: 2
+  resources:
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"

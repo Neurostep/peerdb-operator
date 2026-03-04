@@ -1,0 +1,108 @@
+# -- Number of operator replicas
+replicaCount: 1
+
+image:
+  # -- Operator image repository
+  repository: ghcr.io/neurostep/peerdb-operator
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag (default is the chart appVersion)
+  tag: ""
+
+# -- Image pull secrets
+imagePullSecrets: []
+# -- Override the name of the chart
+nameOverride: ""
+# -- Override the full name of the chart
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+  # -- Annotations to add to the service account
+  annotations: {}
+  # -- The name of the service account to use (if not set, a name is generated using the fullname template)
+  name: ""
+
+# -- Pod annotations
+podAnnotations: {}
+
+# -- Pod labels
+podLabels: {}
+
+# -- Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - "ALL"
+
+# -- Resource requests and limits
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Node selector
+nodeSelector: {}
+
+# -- Tolerations
+tolerations: []
+
+# -- Affinity rules
+affinity: {}
+
+leaderElection:
+  # -- Enable leader election for controller manager
+  enabled: true
+
+webhook:
+  # -- Enable webhook server
+  enabled: false
+  # -- Webhook service port
+  port: 9443
+  certManager:
+    # -- Use cert-manager for webhook certificates
+    enabled: false
+    # -- cert-manager Issuer kind (Issuer or ClusterIssuer)
+    issuerRef:
+      kind: ClusterIssuer
+      name: ""
+
+metrics:
+  # -- Enable the metrics endpoint
+  enabled: false
+  # -- Metrics bind address (use :8443 for HTTPS, :8080 for HTTP)
+  bindAddress: ":8443"
+  # -- Serve metrics securely via HTTPS
+  secure: true
+
+  service:
+    # -- Metrics service port
+    port: 8443
+    # -- Annotations for the metrics service
+    annotations: {}
+
+  serviceMonitor:
+    # -- Create a ServiceMonitor for Prometheus Operator
+    enabled: false
+    # -- Additional labels for the ServiceMonitor
+    additionalLabels: {}
+    # -- Scrape interval
+    interval: ""
+    # -- Scrape timeout
+    scrapeTimeout: ""
+    # -- Metric relabelings
+    metricRelabelings: []
+    # -- Relabelings
+    relabelings: []

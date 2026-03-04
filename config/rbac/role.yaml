@@ -1,0 +1,92 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - peerdb.peerdb.io
+  resources:
+  - peerdbclusters
+  - peerdbsnapshotpools
+  - peerdbworkerpools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - peerdb.peerdb.io
+  resources:
+  - peerdbclusters/finalizers
+  - peerdbsnapshotpools/finalizers
+  - peerdbworkerpools/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - peerdb.peerdb.io
+  resources:
+  - peerdbclusters/status
+  - peerdbsnapshotpools/status
+  - peerdbworkerpools/status
+  verbs:
+  - get
+  - patch
+  - update

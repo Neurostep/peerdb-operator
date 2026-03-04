@@ -1,0 +1,48 @@
+apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBCluster
+metadata:
+  name: peerdb
+  namespace: peerdb-system
+spec:
+  version: "v0.36.7"
+  upgradePolicy: Automatic
+  dependencies:
+    catalog:
+      host: "catalog-postgresql.peerdb-system.svc.cluster.local"
+      port: 5432
+      database: "peerdb"
+      user: "peerdb"
+      passwordSecretRef:
+        name: peerdb-catalog-credentials
+        key: password
+      sslMode: "disable"
+    temporal:
+      address: "temporal-frontend.default.svc.cluster.local:7233"
+      namespace: "default"
+  components:
+    flowAPI:
+      replicas: 2
+      service:
+        type: ClusterIP
+    peerDBServer:
+      replicas: 2
+      service:
+        type: ClusterIP
+      passwordSecretRef:
+        name: peerdb-credentials
+        key: password
+    ui:
+      replicas: 1
+      service:
+        type: LoadBalancer
+      passwordSecretRef:
+        name: peerdb-credentials
+        key: password
+      nextAuthSecretRef:
+        name: peerdb-ui-nextauth
+        key: secret
+  init:
+    temporalNamespaceRegistration:
+      enabled: true
+    temporalSearchAttributes:
+      enabled: true

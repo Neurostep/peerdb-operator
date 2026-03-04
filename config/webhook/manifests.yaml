@@ -1,0 +1,135 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-peerdb-peerdb-io-v1alpha1-peerdbcluster
+  failurePolicy: Fail
+  name: mpeerdbcluster.kb.io
+  rules:
+  - apiGroups:
+    - peerdb.peerdb.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - peerdbclusters
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-peerdb-peerdb-io-v1alpha1-peerdbsnapshotpool
+  failurePolicy: Fail
+  name: mpeerdbsnapshotpool.kb.io
+  rules:
+  - apiGroups:
+    - peerdb.peerdb.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - peerdbsnapshotpools
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-peerdb-peerdb-io-v1alpha1-peerdbworkerpool
+  failurePolicy: Fail
+  name: mpeerdbworkerpool.kb.io
+  rules:
+  - apiGroups:
+    - peerdb.peerdb.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - peerdbworkerpools
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-peerdb-peerdb-io-v1alpha1-peerdbcluster
+  failurePolicy: Fail
+  name: vpeerdbcluster.kb.io
+  rules:
+  - apiGroups:
+    - peerdb.peerdb.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - peerdbclusters
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-peerdb-peerdb-io-v1alpha1-peerdbsnapshotpool
+  failurePolicy: Fail
+  name: vpeerdbsnapshotpool.kb.io
+  rules:
+  - apiGroups:
+    - peerdb.peerdb.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - peerdbsnapshotpools
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-peerdb-peerdb-io-v1alpha1-peerdbworkerpool
+  failurePolicy: Fail
+  name: vpeerdbworkerpool.kb.io
+  rules:
+  - apiGroups:
+    - peerdb.peerdb.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - peerdbworkerpools
+  sideEffects: None
