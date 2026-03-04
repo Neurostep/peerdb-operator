@@ -86,12 +86,12 @@ jobs:
       fail-fast: false
       matrix:
         kube-version:
-          - tag: v1.30.10
-            kind-image: kindest/node:v1.30.10@sha256:4de75d0e82481ea846c0ed1de86328e17eaa07e20d3c3620bff34e3695c3d7aa
-          - tag: v1.31.6
-            kind-image: kindest/node:v1.31.6@sha256:28b7cbb993dfe093c76641a0c95807637213c9109b761f1d422c32ee50cd12c5
-          - tag: v1.32.2
-            kind-image: kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f
+          - tag: v1.31.14
+            kind-image: kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b
+          - tag: v1.32.11
+            kind-image: kindest/node:v1.32.11@sha256:5fc52d52a7b9574015299724bd68f183702956aa4a2116ae75a63cb574b35af8
+          - tag: v1.33.7
+            kind-image: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
     steps:
       - name: Checkout
         uses: actions/checkout@v4
