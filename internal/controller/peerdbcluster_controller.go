@@ -819,6 +819,8 @@ func (r *PeerDBClusterReconciler) reconcileInitJobs(ctx context.Context, cluster
 }
 
 func (r *PeerDBClusterReconciler) reconcileJob(ctx context.Context, cluster *peerdbv1alpha1.PeerDBCluster, desired *batchv1.Job, ready *bool) error {
+	log := logf.FromContext(ctx)
+
 	if err := controllerutil.SetControllerReference(cluster, desired, r.Scheme); err != nil {
 		return err
 	}
@@ -833,12 +835,19 @@ func (r *PeerDBClusterReconciler) reconcileJob(ctx context.Context, cluster *pee
 		return err
 	}
 
-	// Check if job completed.
+	// Check if job completed or failed.
 	for _, c := range existing.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
 			return nil
 		}
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			log.Info("Deleting failed init job for automatic retry", "job", existing.Name)
+			propagation := metav1.DeletePropagationBackground
+			if err := r.Delete(ctx, existing, &client.DeleteOptions{
+				PropagationPolicy: &propagation,
+			}); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
 			*ready = false
 			return nil
 		}

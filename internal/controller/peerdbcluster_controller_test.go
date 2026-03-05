@@ -288,6 +288,64 @@ var _ = Describe("PeerDBCluster Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+		It("should delete failed init jobs for automatic retry", func() {
+			controllerReconciler := &PeerDBClusterReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+			}
+
+			By("running initial reconciliation to create jobs")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("marking the namespace-register job as failed")
+			nsJobName := resourceName + "-temporal-ns-register-v0-36-7"
+			nsJob := &batchv1.Job{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      nsJobName,
+				Namespace: "default",
+			}, nsJob)
+			Expect(err).NotTo(HaveOccurred())
+
+			now := metav1.Now()
+			nsJob.Status.StartTime = &now
+			nsJob.Status.Conditions = append(nsJob.Status.Conditions,
+				batchv1.JobCondition{
+					Type:   batchv1.JobFailureTarget,
+					Status: corev1.ConditionTrue,
+				},
+				batchv1.JobCondition{
+					Type:   batchv1.JobFailed,
+					Status: corev1.ConditionTrue,
+				},
+			)
+			Expect(k8sClient.Status().Update(ctx, nsJob)).To(Succeed())
+
+			By("reconciling again — the failed job should be deleted")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      nsJobName,
+				Namespace: "default",
+			}, &batchv1.Job{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected failed job to be deleted")
+
+			By("verifying Ready condition is False (job not yet complete)")
+			cluster := &peerdbv1alpha1.PeerDBCluster{}
+			err = k8sClient.Get(ctx, typeNamespacedName, cluster)
+			Expect(err).NotTo(HaveOccurred())
+
+			readyCond := meta.FindStatusCondition(cluster.Status.Conditions, peerdbv1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+		})
+
 		It("should set Ready condition to False when components are not ready", func() {
 			controllerReconciler := &PeerDBClusterReconciler{
 				Client:   k8sClient,
