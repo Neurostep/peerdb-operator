@@ -12,6 +12,7 @@ It provides declarative cluster management through custom resources, enabling us
 - **Multiple Worker Pools**: Different sizing, node selectors, and tolerations per workload profile
 - **Scale-to-Zero**: Snapshot workers can scale to zero when no initial loads are running
 - **Automatic Lifecycle Management**: OwnerReferences enable automatic garbage collection on CR deletion
+- **Maintenance Mode Integration**: Gracefully pauses mirrors before upgrades and resumes them after via PeerDB's maintenance workflows
 
 ## Getting Started
 

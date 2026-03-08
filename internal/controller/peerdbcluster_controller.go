@@ -471,6 +471,13 @@ func (r *PeerDBClusterReconciler) reconcileUpgrade(ctx context.Context, cluster 
 	case peerdbv1alpha1.UpgradePhaseBlocked:
 		return r.upgradePhaseBlocked(ctx, cluster)
 
+	case peerdbv1alpha1.UpgradePhaseStartMaintenance:
+		return r.upgradePhaseMaintenanceJob(ctx, cluster,
+			resources.BuildStartMaintenanceJob(cluster),
+			"StartMaintenance",
+			peerdbv1alpha1.UpgradePhaseConfig,
+		)
+
 	case peerdbv1alpha1.UpgradePhaseConfig:
 		// Config/secrets are always reconciled before we get here, so advance immediately.
 		upgrade.Phase = peerdbv1alpha1.UpgradePhaseInitJobs
@@ -498,10 +505,21 @@ func (r *PeerDBClusterReconciler) reconcileUpgrade(ctx context.Context, cluster 
 		)
 
 	case peerdbv1alpha1.UpgradePhaseUI:
+		nextPhase := peerdbv1alpha1.UpgradePhaseComplete
+		if cluster.Spec.Maintenance != nil {
+			nextPhase = peerdbv1alpha1.UpgradePhaseEndMaintenance
+		}
 		return r.upgradePhaseComponent(ctx, cluster,
 			resources.BuildUIDeployment(cluster, configHash),
 			resources.BuildUIService(cluster),
 			"UI",
+			nextPhase,
+		)
+
+	case peerdbv1alpha1.UpgradePhaseEndMaintenance:
+		return r.upgradePhaseMaintenanceJob(ctx, cluster,
+			resources.BuildEndMaintenanceJob(cluster),
+			"EndMaintenance",
 			peerdbv1alpha1.UpgradePhaseComplete,
 		)
 	}
@@ -554,10 +572,16 @@ func (r *PeerDBClusterReconciler) upgradePhaseWaiting(ctx context.Context, clust
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Proceed to config phase.
-	upgrade.Phase = peerdbv1alpha1.UpgradePhaseConfig
-	upgrade.Message = "Reconciling configuration"
-	log.Info("Upgrade advancing to Config phase")
+	// Proceed to maintenance or config phase.
+	if cluster.Spec.Maintenance != nil {
+		upgrade.Phase = peerdbv1alpha1.UpgradePhaseStartMaintenance
+		upgrade.Message = "Starting maintenance mode"
+		log.Info("Upgrade advancing to StartMaintenance phase")
+	} else {
+		upgrade.Phase = peerdbv1alpha1.UpgradePhaseConfig
+		upgrade.Message = "Reconciling configuration"
+		log.Info("Upgrade advancing to Config phase")
+	}
 	return ctrl.Result{Requeue: true}, nil
 }
 
@@ -717,6 +741,123 @@ func (r *PeerDBClusterReconciler) upgradePhaseComponent(
 	upgrade.Message = fmt.Sprintf("Rolling out %s", nextPhase)
 	log.Info("Upgrade advancing", "nextPhase", nextPhase)
 	return ctrl.Result{Requeue: true}, nil
+}
+
+// upgradePhaseMaintenanceJob reconciles a maintenance mode Job (start or end)
+// and advances to the next upgrade phase once the Job completes.
+func (r *PeerDBClusterReconciler) upgradePhaseMaintenanceJob(
+	ctx context.Context,
+	cluster *peerdbv1alpha1.PeerDBCluster,
+	job *batchv1.Job,
+	phaseName string,
+	nextPhase peerdbv1alpha1.UpgradePhase,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	upgrade := cluster.Status.Upgrade
+
+	if err := controllerutil.SetControllerReference(cluster, job, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Pick the appropriate reason depending on whether we are starting or ending maintenance.
+	creatingReason := peerdbv1alpha1.ReasonMaintenanceStarting
+	if nextPhase == peerdbv1alpha1.UpgradePhaseComplete {
+		creatingReason = peerdbv1alpha1.ReasonMaintenanceEnding
+	}
+
+	existing := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing)
+	if apierrors.IsNotFound(err) {
+		log.Info("Creating maintenance job", "job", job.Name, "phase", phaseName)
+		r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, creatingReason, phaseName,
+			"Creating maintenance job %s", job.Name)
+		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+			Type:               peerdbv1alpha1.ConditionMaintenanceMode,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: cluster.Generation,
+			Reason:             creatingReason,
+			Message:            fmt.Sprintf("Maintenance job %s is running", phaseName),
+		})
+		if createErr := r.Create(ctx, job); createErr != nil {
+			return ctrl.Result{}, createErr
+		}
+		upgrade.Message = fmt.Sprintf("Waiting for %s job to complete", phaseName)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Check Job status.
+	for _, c := range existing.Status.Conditions {
+		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
+			log.Info("Maintenance job completed", "job", job.Name, "phase", phaseName)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonMaintenanceComplete, phaseName,
+				"Maintenance job %s completed", job.Name)
+
+			if nextPhase == peerdbv1alpha1.UpgradePhaseComplete {
+				// EndMaintenance completed — clear the condition and finish upgrade.
+				meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+					Type:               peerdbv1alpha1.ConditionMaintenanceMode,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: cluster.Generation,
+					Reason:             peerdbv1alpha1.ReasonMaintenanceComplete,
+					Message:            "Maintenance mode ended, mirrors resumed",
+				})
+				upgrade.Phase = peerdbv1alpha1.UpgradePhaseComplete
+				upgrade.Message = fmt.Sprintf("Upgrade complete: %s → %s", upgrade.FromVersion, upgrade.ToVersion)
+				meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+					Type:               peerdbv1alpha1.ConditionUpgradeInProgress,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: cluster.Generation,
+					Reason:             peerdbv1alpha1.ReasonUpgradeComplete,
+					Message:            upgrade.Message,
+				})
+				r.Recorder.Eventf(cluster, nil, corev1.EventTypeNormal, peerdbv1alpha1.ReasonUpgradeComplete, "UpgradeComplete",
+					"Version upgrade complete: %s → %s", upgrade.FromVersion, upgrade.ToVersion)
+				log.Info("Upgrade complete", "from", upgrade.FromVersion, "to", upgrade.ToVersion)
+				return ctrl.Result{}, nil
+			}
+
+			// StartMaintenance completed — mark active and advance.
+			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+				Type:               peerdbv1alpha1.ConditionMaintenanceMode,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: cluster.Generation,
+				Reason:             peerdbv1alpha1.ReasonMaintenanceActive,
+				Message:            "Maintenance mode active, mirrors paused",
+			})
+			upgrade.Phase = nextPhase
+			upgrade.Message = fmt.Sprintf("Advancing to %s", nextPhase)
+			log.Info("Upgrade advancing after maintenance job", "nextPhase", nextPhase)
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			log.Info("Maintenance job failed, retrying", "job", existing.Name, "phase", phaseName)
+			r.Recorder.Eventf(cluster, nil, corev1.EventTypeWarning, peerdbv1alpha1.ReasonMaintenanceFailed, phaseName,
+				"Maintenance job %s failed, deleting for retry", existing.Name)
+			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+				Type:               peerdbv1alpha1.ConditionDegraded,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: cluster.Generation,
+				Reason:             peerdbv1alpha1.ReasonMaintenanceFailed,
+				Message:            fmt.Sprintf("Maintenance job %s failed", phaseName),
+			})
+			propagation := metav1.DeletePropagationBackground
+			if delErr := r.Delete(ctx, existing, &client.DeleteOptions{
+				PropagationPolicy: &propagation,
+			}); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, delErr
+			}
+			upgrade.Message = fmt.Sprintf("Maintenance job %s failed, retrying", phaseName)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
+
+	// Job still running.
+	upgrade.Message = fmt.Sprintf("Waiting for %s job to complete", phaseName)
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 func (r *PeerDBClusterReconciler) isJobFailed(ctx context.Context, namespace, name string) (bool, error) {

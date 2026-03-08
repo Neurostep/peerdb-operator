@@ -32,6 +32,7 @@ This document describes all Custom Resource Definitions (CRDs) managed by the Pe
 | `paused` | `bool` | No | `false` | When true, the operator stops reconciling this cluster. |
 | `upgradePolicy` | [`UpgradePolicy`](#upgradepolicy) | No | `Automatic` | Controls how version upgrades are applied. Enum: `Automatic`, `Manual`. |
 | `maintenanceWindow` | [`MaintenanceWindow`](#maintenancewindow) | No | — | Time window for automatic upgrades. Only used when `upgradePolicy` is `Automatic`. |
+| `maintenance` | [`MaintenanceSpec`](#maintenancespec) | No | — | Configures PeerDB maintenance mode for graceful upgrades. When set, the operator pauses mirrors before upgrading and resumes them after. |
 
 ### PeerDBClusterStatus
 
@@ -205,6 +206,16 @@ Defines a time window during which automatic upgrades may be applied.
 | `end` | `string` | **Yes** | — | End time in 24-hour `HH:MM` format. |
 | `timeZone` | `*string` | No | `UTC` | IANA timezone name (e.g., `America/New_York`). |
 
+### MaintenanceSpec
+
+Configuration for PeerDB maintenance mode during upgrades. When configured, the operator runs maintenance Jobs (`ghcr.io/peerdb-io/flow-maintenance`) to gracefully pause all mirrors before upgrading and resume them after.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `image` | `*string` | No | `ghcr.io/peerdb-io/flow-maintenance:stable-{version}` | Container image override for the maintenance Job. |
+| `backoffLimit` | `*int32` | No | `4` | Number of retries before marking the maintenance Job as failed (min: 0). |
+| `resources` | `*ResourceRequirements` | No | — | CPU/memory resource requests and limits for the maintenance Job container. |
+
 ### UpgradePolicy
 
 `string` enum controlling how version upgrades are applied.
@@ -232,7 +243,7 @@ Tracks the state of a rolling version upgrade.
 |-------|------|-------------|
 | `fromVersion` | `string` | The version being upgraded from. |
 | `toVersion` | `string` | The version being upgraded to. |
-| `phase` | `UpgradePhase` | Current upgrade phase. Values: `Complete`, `Waiting`, `Blocked`, `Config`, `InitJobs`, `FlowAPI`, `PeerDBServer`, `UI`. |
+| `phase` | `UpgradePhase` | Current upgrade phase. Values: `Complete`, `Waiting`, `Blocked`, `StartMaintenance`, `Config`, `InitJobs`, `FlowAPI`, `PeerDBServer`, `UI`, `EndMaintenance`. |
 | `startedAt` | `*metav1.Time` | Timestamp when the upgrade started. |
 | `message` | `string` | Human-readable message about the upgrade state. |
 
@@ -361,6 +372,7 @@ The following condition types are used in `PeerDBCluster` status:
 | `Degraded` | Set to `True` when one or more components are unhealthy but the cluster is partially operational. |
 | `UpgradeInProgress` | Set to `True` when a version upgrade is in progress. |
 | `BackupSafe` | Whether it is safe to take a backup. `True` when no upgrade or rolling restart is in progress. `False` with reason `BackupInProgress` when the `peerdb.io/backup-in-progress` annotation is set, or `BackupUnsafe` when an upgrade/rollout is active. |
+| `MaintenanceMode` | Set to `True` when PeerDB maintenance mode is active (mirrors are paused for an upgrade). Set to `False` with reason `MaintenanceComplete` after mirrors are resumed. |
 
 ### Annotations
 
@@ -383,9 +395,11 @@ The `UpgradeStatus.phase` field tracks progress through a rolling upgrade:
 |-------|-------------|
 | `Waiting` | Upgrade is pending (e.g., waiting for a maintenance window). |
 | `Blocked` | Upgrade is blocked (e.g., manual policy requires acknowledgement). |
+| `StartMaintenance` | Running the StartMaintenance Job to pause mirrors before upgrade. |
 | `Config` | Updating shared ConfigMap and configuration. |
 | `InitJobs` | Re-running init jobs if needed. |
 | `FlowAPI` | Rolling out the Flow API Deployment. |
 | `PeerDBServer` | Rolling out the PeerDB Server Deployment. |
 | `UI` | Rolling out the PeerDB UI Deployment. |
+| `EndMaintenance` | Running the EndMaintenance Job to resume mirrors after upgrade. |
 | `Complete` | Upgrade finished successfully. |

@@ -41,6 +41,8 @@ const (
 	ConditionUpgradeInProgress = "UpgradeInProgress"
 	// ConditionBackupSafe indicates whether it is safe to take a backup (no rolling restarts or upgrades in progress).
 	ConditionBackupSafe = "BackupSafe"
+	// ConditionMaintenanceMode indicates PeerDB maintenance mode is active.
+	ConditionMaintenanceMode = "MaintenanceMode"
 )
 
 // Reason constants for status conditions.
@@ -105,6 +107,16 @@ const (
 	ReasonBackupSafe = "BackupSafe"
 	// ReasonBackupUnsafe indicates the cluster is not safe for backup (upgrade or rollout in progress).
 	ReasonBackupUnsafe = "BackupUnsafe"
+	// ReasonMaintenanceStarting indicates maintenance mode is being activated.
+	ReasonMaintenanceStarting = "MaintenanceStarting"
+	// ReasonMaintenanceActive indicates maintenance mode is active.
+	ReasonMaintenanceActive = "MaintenanceActive"
+	// ReasonMaintenanceEnding indicates maintenance mode is being deactivated.
+	ReasonMaintenanceEnding = "MaintenanceEnding"
+	// ReasonMaintenanceComplete indicates maintenance mode has been deactivated.
+	ReasonMaintenanceComplete = "MaintenanceComplete"
+	// ReasonMaintenanceFailed indicates a maintenance mode job failed.
+	ReasonMaintenanceFailed = "MaintenanceFailed"
 )
 
 // Annotation constants for PeerDBCluster.
@@ -344,6 +356,23 @@ type InitSpec struct {
 	TemporalSearchAttributes *InitJobSpec `json:"temporalSearchAttributes,omitempty"`
 }
 
+// MaintenanceSpec configures PeerDB maintenance mode for upgrades.
+// When enabled, the operator triggers PeerDB's maintenance workflows
+// to gracefully pause mirrors before upgrading and resume them after.
+type MaintenanceSpec struct {
+	// image overrides the default flow-maintenance container image.
+	// +optional
+	Image *string `json:"image,omitempty"`
+	// backoffLimit is the number of retries before marking the maintenance job as failed.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=4
+	// +optional
+	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
+	// resources defines compute resource requirements for the maintenance job container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
 // UpgradePolicy controls whether the operator automatically performs version upgrades.
 // +kubebuilder:validation:Enum=Automatic;Manual
 type UpgradePolicy string
@@ -373,14 +402,16 @@ type MaintenanceWindow struct {
 type UpgradePhase string
 
 const (
-	UpgradePhaseComplete UpgradePhase = "Complete"
-	UpgradePhaseWaiting  UpgradePhase = "Waiting"
-	UpgradePhaseBlocked  UpgradePhase = "Blocked"
-	UpgradePhaseConfig   UpgradePhase = "Config"
-	UpgradePhaseInitJobs UpgradePhase = "InitJobs"
-	UpgradePhaseFlowAPI  UpgradePhase = "FlowAPI"
-	UpgradePhaseServer   UpgradePhase = "PeerDBServer"
-	UpgradePhaseUI       UpgradePhase = "UI"
+	UpgradePhaseComplete         UpgradePhase = "Complete"
+	UpgradePhaseWaiting          UpgradePhase = "Waiting"
+	UpgradePhaseBlocked          UpgradePhase = "Blocked"
+	UpgradePhaseStartMaintenance UpgradePhase = "StartMaintenance"
+	UpgradePhaseConfig           UpgradePhase = "Config"
+	UpgradePhaseInitJobs         UpgradePhase = "InitJobs"
+	UpgradePhaseFlowAPI          UpgradePhase = "FlowAPI"
+	UpgradePhaseServer           UpgradePhase = "PeerDBServer"
+	UpgradePhaseUI               UpgradePhase = "UI"
+	UpgradePhaseEndMaintenance   UpgradePhase = "EndMaintenance"
 )
 
 // UpgradeStatus tracks the progress of a version upgrade.
@@ -446,6 +477,11 @@ type PeerDBClusterSpec struct {
 	// Only used when upgradePolicy is Automatic.
 	// +optional
 	MaintenanceWindow *MaintenanceWindow `json:"maintenanceWindow,omitempty"`
+	// maintenance configures PeerDB maintenance mode for graceful upgrades.
+	// When configured, the operator runs maintenance workflows to pause mirrors
+	// before upgrading and resume them after.
+	// +optional
+	Maintenance *MaintenanceSpec `json:"maintenance,omitempty"`
 }
 
 // PeerDBClusterStatus defines the observed state of PeerDBCluster.

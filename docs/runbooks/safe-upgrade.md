@@ -70,10 +70,11 @@ For more control, use the manual upgrade policy:
 The controller enforces a specific rollout order to minimize disruption:
 
 ```
-ConfigMap/Secrets → Init Jobs → Flow API → PeerDB Server → UI
+[StartMaintenance →] ConfigMap/Secrets → Init Jobs → Flow API → PeerDB Server → UI [→ EndMaintenance]
 ```
 
 Each step must complete successfully before the next begins. This ensures:
+- Mirrors are gracefully paused before any component restarts (when `spec.maintenance` is configured).
 - Configuration is propagated before any component restarts.
 - The Flow API (gRPC backend) is ready before the Server and UI that depend on it.
 - The UI is upgraded last since it's the least critical component.
@@ -101,6 +102,48 @@ spec:
 - The maintenance window is only used when `upgradePolicy` is `Automatic`.
 - Remove or omit `maintenanceWindow` to allow upgrades at any time.
 - If `timeZone` is not specified, it defaults to UTC.
+
+## Maintenance Mode
+
+PeerDB has a built-in maintenance mode that gracefully pauses all running mirrors before an upgrade and resumes them after. The operator integrates this via Kubernetes Jobs:
+
+```yaml
+apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBCluster
+metadata:
+  name: peerdb
+spec:
+  version: "v0.37.0"
+  maintenance: {}
+  # ... rest of spec
+```
+
+When `spec.maintenance` is set, the upgrade flow becomes:
+
+1. **StartMaintenance** — A Job runs using the `flow-maintenance` image with `start` command. This triggers PeerDB's `StartMaintenance` Temporal workflow, which waits for running snapshots, enables maintenance mode (`PEERDB_MAINTENANCE_MODE_ENABLED`), and pauses all running mirrors.
+2. **Normal upgrade** — Config, init jobs, Flow API, Server, and UI are rolled out in order.
+3. **EndMaintenance** — A Job runs with the `end` command, resuming all previously paused mirrors and disabling maintenance mode.
+
+While maintenance mode is active, mirrors cannot be created or mutated through PeerDB.
+
+### Customizing the Maintenance Job
+
+```yaml
+spec:
+  maintenance:
+    image: "custom-registry/flow-maintenance:v1.0.0"  # Override image
+    backoffLimit: 6                                     # Retry count
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+```
+
+If a maintenance Job fails, the operator deletes it and retries automatically. A `Degraded` condition is set so you can monitor failures via:
+
+```bash
+kubectl get peerdbcluster <name> -o jsonpath='{.status.conditions}' | jq '.[] | select(.type=="MaintenanceMode")'
+```
 
 ## Monitoring Upgrade Progress
 
@@ -140,8 +183,10 @@ Example output:
 | `FlowAPI` | Rolling out Flow API Deployment |
 | `PeerDBServer` | Rolling out PeerDB Server Deployment |
 | `UI` | Rolling out UI Deployment |
+| `EndMaintenance` | Running EndMaintenance Job (resuming mirrors) |
 | `Complete` | Upgrade finished successfully |
 | `Blocked` | Upgrade blocked — dependencies are unhealthy |
+| `StartMaintenance` | Running StartMaintenance Job (pausing mirrors) |
 
 ### Watch Upgrade Events
 
