@@ -37,6 +37,7 @@ flowchart TB
         UISvc["PeerDB UI\nService :3000"]
         NSJob["Temporal NS\nRegister Job"]
         SAJob["Search Attr\nJob"]
+        MaintJob["Maintenance\nJobs"]
     end
 
     subgraph ManagedByWorker["Owned by PeerDBWorkerPool"]
@@ -58,6 +59,7 @@ flowchart TB
     CC --> UISvc
     CC --> NSJob
     CC --> SAJob
+    CC --> MaintJob
 
     WC -->|"reads cluster config"| PeerDBCluster
     WC --> WorkerDep
@@ -121,9 +123,11 @@ A single CRD would force all scaling decisions through one reconciler and one sp
 
 1. **Dependency validation** — Check catalog password Secret exists before proceeding
 2. **Shared infrastructure** — ServiceAccount → ConfigMap (connection config)
-3. **Init jobs** — Idempotent Temporal setup jobs; cluster waits for completion
-4. **Components** — Flow API → PeerDB Server → UI (Deployments + Services)
-5. **Status rollup** — Individual conditions aggregate into overall `Ready` condition
+3. **Maintenance mode** — If `spec.maintenance` is set, run StartMaintenance Job to pause mirrors (upgrade only)
+4. **Init jobs** — Idempotent Temporal setup jobs; cluster waits for completion
+5. **Components** — Flow API → PeerDB Server → UI (Deployments + Services)
+6. **End maintenance** — If `spec.maintenance` is set, run EndMaintenance Job to resume mirrors (upgrade only)
+7. **Status rollup** — Individual conditions aggregate into overall `Ready` condition
 
 All managed resources have **OwnerReferences** set to the parent CR, enabling automatic garbage collection on deletion without custom finalizers.
 
@@ -154,7 +158,8 @@ internal/
     ├── ui.go                    # PeerDB UI Deployment + Service
     ├── flow_worker.go           # Flow Worker Deployment
     ├── snapshot_worker.go       # Snapshot Worker StatefulSet + headless Service
-    └── init_jobs.go             # Temporal init Jobs
+    ├── init_jobs.go             # Temporal init Jobs
+    └── maintenance_jobs.go      # Maintenance mode Jobs
 
 config/
 ├── crd/bases/                   # Generated CRD manifests
