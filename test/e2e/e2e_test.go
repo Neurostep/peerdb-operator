@@ -563,6 +563,97 @@ spec:
 			}).Should(Succeed())
 		})
 
+		It("should create maintenance jobs during upgrade when maintenance is configured", func() {
+			By("creating a PeerDBCluster with maintenance mode")
+			maintClusterYAML := `apiVersion: peerdb.peerdb.io/v1alpha1
+kind: PeerDBCluster
+metadata:
+  name: e2e-maint-cluster
+  namespace: ` + testNs + `
+spec:
+  version: "v0.36.7"
+  maintenance: {}
+  dependencies:
+    catalog:
+      host: "catalog.example.com"
+      port: 5432
+      database: "peerdb"
+      user: "peerdb"
+      passwordSecretRef:
+        name: e2e-catalog-password
+        key: password
+      sslMode: "disable"
+    temporal:
+      address: "temporal.example.com:7233"
+      namespace: "default"
+  init:
+    temporalNamespaceRegistration:
+      enabled: false
+    temporalSearchAttributes:
+      enabled: false`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(maintClusterYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the cluster to be reconciled")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "e2e-maint-cluster-flow-api",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("triggering an upgrade by patching the version")
+			cmd = exec.Command("kubectl", "patch", "peerdbcluster", "e2e-maint-cluster",
+				"-n", testNs, "--type", "merge",
+				"-p", `{"spec":{"version":"v0.36.8"}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the start maintenance job is created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "job",
+					"e2e-maint-cluster-maintenance-start-v0-36-8",
+					"-n", testNs, "--no-headers")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("verifying the upgrade status shows StartMaintenance phase")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "peerdbcluster", "e2e-maint-cluster",
+					"-n", testNs, "-o", "jsonpath={.status.upgrade.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("StartMaintenance"))
+			}).Should(Succeed())
+
+			By("verifying the maintenance job has correct container command")
+			cmd = exec.Command("kubectl", "get", "job",
+				"e2e-maint-cluster-maintenance-start-v0-36-8",
+				"-n", testNs,
+				"-o", "jsonpath={.spec.template.spec.containers[0].command}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("maintenance"))
+			Expect(output).To(ContainSubstring("start"))
+
+			By("verifying the maintenance job has ownerReference to PeerDBCluster")
+			cmd = exec.Command("kubectl", "get", "job",
+				"e2e-maint-cluster-maintenance-start-v0-36-8",
+				"-n", testNs,
+				"-o", "jsonpath={.metadata.ownerReferences[0].kind}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("PeerDBCluster"))
+
+			By("cleaning up the maintenance cluster")
+			cmd = exec.Command("kubectl", "delete", "peerdbcluster", "e2e-maint-cluster",
+				"-n", testNs, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
 		It("should clean up owned resources when PeerDBCluster is deleted", func() {
 			By("deleting the PeerDBWorkerPool")
 			cmd := exec.Command("kubectl", "delete", "peerdbworkerpool", "e2e-workers",
