@@ -20,8 +20,9 @@ limitations under the License.
 package v1alpha1
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 var (
@@ -29,8 +30,29 @@ var (
 	GroupVersion = schema.GroupVersion{Group: "peerdb.peerdb.io", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
-	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+	SchemeBuilder = &Builder{GroupVersion: GroupVersion}
 
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
+
+// Builder registers go types with a Scheme for a single GroupVersion. It
+// replaces the deprecated sigs.k8s.io/controller-runtime/pkg/scheme.Builder so
+// the api package stays free of controller-runtime dependencies.
+//
+// +kubebuilder:object:generate=false
+type Builder struct {
+	GroupVersion schema.GroupVersion
+	runtime.SchemeBuilder
+}
+
+// Register queues one or more objects for registration under the Builder's
+// GroupVersion when AddToScheme is called.
+func (bld *Builder) Register(objects ...runtime.Object) *Builder {
+	bld.SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(bld.GroupVersion, objects...)
+		metav1.AddToGroupVersion(s, bld.GroupVersion)
+		return nil
+	})
+	return bld
+}
